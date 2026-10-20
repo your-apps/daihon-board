@@ -4,7 +4,7 @@
 // データは端末内（localStorage）にだけ保存する。外へは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-20d';
+const APP_BUILD = '2026-10-20e';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
