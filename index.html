@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>台本ボード</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="台本ボード">
+<meta name="theme-color" content="#f6f4ef">
+<meta http-equiv="Cache-Control" content="no-cache">
+<link rel="manifest" href="manifest.webmanifest">
+</head>
+<body>
+<div id="app"></div>
+<div id="modal-root"></div>
+<script>
+// 古い版が残らないよう、毎回 ?v=時刻 を付けて読み込む（サービスワーカーは使わない）
+(function () {
+  var v = '?v=' + Date.now();
+  var link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = 'style.css' + v;
+  document.head.appendChild(link);
+  function load(list, i) {
+    if (i >= list.length) return;
+    var s = document.createElement('script');
+    s.src = list[i] + v;
+    s.onload = function () { load(list, i + 1); };
+    s.onerror = function () {
+      if (list[i] === 'app.js') {
+        document.getElementById('app').textContent = 'アプリを読み込めませんでした。電波のよいところで開き直してください。';
+      } else {
+        load(list, i + 1);
+      }
+    };
+    document.body.appendChild(s);
+  }
+  load(['seeds.js', 'sample-othello.js', 'app.js'], 0);
+})();
+</script>
+</body>
+</html>
