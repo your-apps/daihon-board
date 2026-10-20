@@ -484,3 +484,37 @@ body.lifting .undo-toast { display: none; }
   background: var(--ink); color: var(--paper); font-size: 14px; white-space: nowrap;
 }
 .undo-toast .undo-btn { color: var(--ink); min-height: 36px; border-radius: 18px; padding: 2px 14px; }
+
+/* ---------- 次の一手 ---------- */
+.nextbar {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 16px 0; padding: 8px 10px 8px 12px;
+  background: var(--paper); border: 1px solid var(--ink); border-radius: 10px;
+}
+.nextbar .next-kind { flex: 0 0 auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.nextbar .next-text { flex: 1 1 auto; min-width: 0; font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nextbar .next-go { flex: 0 0 auto; min-height: 36px; padding: 2px 14px; border-radius: 18px; }
+.nextbar .next-later { flex: 0 0 auto; min-height: 36px; font-size: 13px; color: var(--muted); }
+body.lifting .nextbar { display: none; }
+
+/* ---------- 思いつきを1行で ---------- */
+.quickbar {
+  position: sticky; bottom: 0; z-index: 20;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px max(16px, env(safe-area-inset-left)) calc(8px + env(safe-area-inset-bottom));
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+.quickbar .quick-input { flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 4px 14px; font-size: 16px; border: 1px solid var(--line); border-radius: 20px; background: var(--paper); color: var(--ink); }
+.quickbar .quick-go { flex: 0 0 auto; min-height: 40px; padding: 2px 16px; border-radius: 20px; }
+body.lifting .quickbar { display: none; }
+/* 入力欄の高さぶん、下の帯・トーストを上に出す（欄が見えているときだけ） */
+body.has-quick:not(.lifting) .undo-toast { bottom: calc(16px + 58px + env(safe-area-inset-bottom)); }
+body.has-quick:not(.lifting) .toast { bottom: calc(24px + 58px + env(safe-area-inset-bottom)); }
+
+/* ---------- 空き枠の道しるべ ---------- */
+.slot.guide { min-height: 22px; height: 22px; border: none; padding: 0 4px; }
+.slot.guide .guide-line { flex: 0 0 14px; height: 0; border-top: 1px solid var(--line); }
+.slot.guide .beat-cap { opacity: 1; font-size: 10px; }
+/* 内容が短くても、入力欄が画面の下に来るように */
+body.has-quick #app { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
+body.has-quick #app > .quickbar { margin-top: auto; }

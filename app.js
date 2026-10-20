@@ -4,9 +4,10 @@
 // データは端末内（localStorage）にだけ保存する。外へは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-20b';
+const APP_BUILD = '2026-10-20c';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
+const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
 const STORE_PREFIX = 'daihon-board/work/';
 const META_PREFIX = 'daihon-board/meta/';       // 書き出しの状態（この端末だけ。作品のデータには入れない）
 const HISTORY_PREFIX = 'daihon-board/history/';  // 版の履歴（新しい順）
@@ -22,9 +23,27 @@ const OLD_PALETTE = ['#0072b2', '#d55e00', '#009e73', '#cc79a7', '#e69f00', '#7a
 const SHAPES = ['circle', 'square', 'triangle', 'diamond', 'down', 'cross'];
 
 const TYPES = {
-  shiba: { label: '柴型（3段×10枚）', short: '柴型', blocks: ['第1ブロック', '第2ブロック', '第3ブロック'] },
-  snyder: { label: 'スナイダー型（4段×10枚）', short: 'スナイダー型', blocks: ['第1幕', '第2幕・前半', '第2幕・後半', '第3幕'] },
+  shiba: { label: '一幕構成（3段×10枚）', short: '一幕構成', blocks: ['序', '破', '急'] },
+  snyder: { label: '二幕構成（4段×10枚）', short: '二幕構成', blocks: ['一幕前半・序', '一幕後半・破', '二幕前半・破', '二幕後半・急'] },
 };
+// 古い版で使っていた段の名前（読み込み時に新しい名前へ移し替える）
+const OLD_BLOCK_NAMES = {
+  shiba: ['第1ブロック', '第2ブロック', '第3ブロック'],
+  snyder: ['第1幕', '第2幕・前半', '第2幕・後半', '第3幕'],
+};
+
+// 休憩は型で決まる：二幕構成は「一幕後半・破」（2段目）の最後、一幕構成は休憩なし。
+// { blockId, index } か null。index はそのブロックの index 枚目の前（＝最後なら枚数）
+function intermissionOf(w) {
+  if (!w || w.type !== 'snyder' || !Array.isArray(w.blocks) || !w.blocks[1]) return null;
+  return { blockId: w.blocks[1].id, index: w.blocks[1].cards.length };
+}
+
+// 保存用の work.intermission を、型から求めた値に合わせる（古いアプリで開いても崩れないように）
+function syncIntermission(w) {
+  const im = intermissionOf(w);
+  w.intermission = im ? { blockId: im.blockId, index: im.index } : null;
+}
 
 const app = document.getElementById('app');
 const modalRoot = document.getElementById('modal-root');
@@ -47,10 +66,12 @@ const ui = {
   entEditOpen: false, // 人物タブの登録（編集）を開いているか
   graphOn: {},       // グラフで表示する人物（人物id → true/false）。この画面の中だけ。データには入れない
   lastSnap: null,    // { id, t }：履歴に最後に控えを取った時刻
-  lifted: null,      // 持ち上げ中のもの { kind: 'card' | 'break', id }。この画面の中だけ
+  lifted: null,      // 持ち上げ中のもの { kind: 'card', id }。この画面の中だけ
   undo: null,        // 動かした直後の［元に戻す］用 { snap, workId, timer, item }
-  landed: null,      // 置いた直後に光らせるもの { kind: 'card' | 'break', id, at }。データには入れない
+  landed: null,      // 置いた直後に光らせるもの { kind: 'card', id, at }。データには入れない
   focus: null,       // 筋・人物で絞り込み { kind: 'thread' | 'char', id }。データには入れない
+  nextSkip: new Set(), // 「次の一手」で［あとで］に送った候補のキー。データには入れない
+  quickDraft: '',    // 「思いつきを1行で」の書きかけ。データには入れない
 };
 
 // ---------- 小道具 ----------
@@ -115,7 +136,7 @@ function newWork(title, type) {
     createdAt: now,
     updatedAt: now,
     blocks: TYPES[type].blocks.map((name) => ({ id: uid(), name, cards: [] })),
-    intermission: null, // { blockId, index }：そのブロックの index 枚目の前に置く
+    intermission: null, // 型から求めた値を保存のときに書く（読むときは intermissionOf を使う）
     pool: [],           // 保留のカード（どこに置くか決まっていないもの）
     threads: [],
     characters: [],
@@ -150,6 +171,14 @@ function normalizeWork(w) {
   }
   w.core = core;
   w.showBeats = w.showBeats !== false;
+  // 段の名前：古い決まりの名前か空なら、同じ位置の新しい名前にする（自分で付けた名前は残す）
+  const oldNames = OLD_BLOCK_NAMES[w.type];
+  const newNames = TYPES[w.type] && TYPES[w.type].blocks;
+  if (oldNames && newNames) {
+    w.blocks.forEach((b, i) => {
+      if (b && newNames[i] && (typeof b.name !== 'string' || !b.name.trim() || b.name === oldNames[i])) b.name = newNames[i];
+    });
+  }
   const tIds = new Set(w.threads.map((e) => e.id));
   const cIds = new Set(w.characters.map((e) => e.id));
   const seen = new Set();
@@ -182,6 +211,7 @@ function normalizeWork(w) {
   };
   for (const b of w.blocks) b.cards = (Array.isArray(b.cards) ? b.cards : []).map(normCard);
   w.pool = (Array.isArray(w.pool) ? w.pool : []).map(normCard);
+  syncIntermission(w);
   return w;
 }
 
@@ -281,7 +311,7 @@ function buildOutline() {
     ['event', '決定的な出来事'], ['change', '最後の変化'], ['theme', 'テーマ']];
   const coreParts = labels.filter(([k]) => co[k].trim()).map(([k, l]) => `${l}：${co[k].trim().replace(/\s*\n\s*/g, ' ')}`);
   if (coreParts.length) out.push(`【芯】${coreParts.join(' ／ ')}`);
-  const im = work.intermission;
+  const im = intermissionOf(work);
   work.blocks.forEach((b, bi) => {
     out.push('', `■ ${b.name}`);
     const imIndex = im && im.blockId === b.id ? Math.min(im.index, b.cards.length) : -1;
@@ -400,8 +430,6 @@ function deleteCard(cardId) {
   const x = findCard(cardId);
   if (!x) return;
   x.block.cards.splice(x.index, 1);
-  const im = work.intermission;
-  if (im && im.blockId === x.block.id && im.index > x.index) im.index--;
   changed();
 }
 
@@ -410,15 +438,10 @@ function changeType(type) {
   pushHistory(work, '型を変える前');
   const b = work.blocks;
   if (type === 'snyder') {
-    // 柴型の第2ブロックをスナイダー型の第2幕・前半とし、後半を空で足す
+    // 一幕構成の「破」を二幕構成の「一幕後半・破」とし、「二幕前半・破」を空で足す
     work.blocks = [b[0], b[1], { id: uid(), name: '', cards: [] }, b[2]];
   } else {
-    // スナイダー型の第2幕の前半と後半をひとつにまとめる
-    const im = work.intermission;
-    if (im && im.blockId === b[2].id) {
-      im.blockId = b[1].id;
-      im.index += b[1].cards.length;
-    }
+    // 二幕構成の真ん中の2段（一幕後半・破と二幕前半・破）をひとつにまとめる
     b[1].cards = b[1].cards.concat(b[2].cards);
     work.blocks = [b[0], b[1], b[3]];
   }
@@ -486,6 +509,7 @@ function saveNow() {
 // 作品そのものを保存する。容量が足りなければ、履歴を古いほうから減らして保存し直す
 // （履歴が端末の容量を埋めて、本体が保存できなくなるのを防ぐ）。
 function writeMainWork(w) {
+  syncIntermission(w);
   const data = JSON.stringify(w);
   for (let tries = 0; tries < 8; tries++) {
     try {
@@ -542,6 +566,9 @@ function openWork(w) {
   ui.focus = null;
   ui.newWorkOpen = false;
   ui.tab = 'board';
+  ui.nextSkip = new Set();
+  ui.quickDraft = '';
+  try { localStorage.setItem(LAST_KEY, w.id); } catch (e) { /* 書けなくても無視 */ }
   pushHistory(w, '開いたとき');
   renderMain();
 }
@@ -549,6 +576,7 @@ function openWork(w) {
 // 作品のデータ（本体・書き出しの控え・履歴）を端末から消す
 function deleteWorkData(id) {
   try {
+    if (localStorage.getItem(LAST_KEY) === id) localStorage.removeItem(LAST_KEY);
     localStorage.removeItem(STORE_PREFIX + id);
     localStorage.removeItem(META_PREFIX + id);
     localStorage.removeItem(HISTORY_PREFIX + id);
@@ -633,6 +661,7 @@ function pushHistory(w, reason, force) {
       return true;
     }
     ui.lastSnap = { id: w.id, t: Date.now() };
+    syncIntermission(w);
     hist.unshift({ at: new Date().toISOString(), reason, cards: cardCount(w), updatedAt: w.updatedAt, work: w });
     return writeHistory(w.id, hist);
   } catch (e) {
@@ -680,6 +709,7 @@ async function exportWork() {
   const w = work;
   const stamp = w.updatedAt;
   const now = new Date();
+  syncIntermission(w);
   const body = JSON.stringify(Object.assign({}, w, { exportedAt: now.toISOString() }), null, 2);
   const file = new File([body], exportFileName(w.title, now), { type: 'application/json' });
   ui.exporting = true;
@@ -975,7 +1005,7 @@ function cardEl(c, over, bi, idx) {
 // ブロックの中身（カード・休憩・空き枠）を並べる
 function blockItems(b) {
   const items = [];
-  const im = work.intermission;
+  const im = intermissionOf(work);
   const imIndex = im && im.blockId === b.id ? Math.min(im.index, b.cards.length) : -1;
   const bi = work.blocks.indexOf(b);
   b.cards.forEach((c, i) => {
@@ -985,9 +1015,11 @@ function blockItems(b) {
   if (imIndex === b.cards.length) items.push(breakEl());
   for (let i = b.cards.length; i < SLOTS; i++) {
     // 空き枠には、置き場所のビートを薄い札で出す。＋は最初の空き枠だけ
+    // 次の空き枠だけ点線の箱、それより後ろは枠線のない「道しるべ」
     const pb = beatsOn() ? positionBeat(bi, i) : null;
-    items.push(h('button', { type: 'button', class: 'slot', 'aria-label': 'カードを足す', onclick: () => addCard(b.id) },
-      i === b.cards.length ? '＋' : '', pb && h('span', { class: 'beat-cap' }, pb.label)));
+    const next = i === b.cards.length;
+    items.push(h('button', { type: 'button', class: next ? 'slot' : 'slot guide', 'aria-label': 'カードを足す', onclick: () => addCard(b.id) },
+      next ? '＋' : h('i', { class: 'guide-line' }), pb && h('span', { class: 'beat-cap' }, pb.label)));
   }
   if (b.cards.length >= SLOTS) {
     items.push(h('button', { type: 'button', class: 'slot add-over', 'aria-label': '枠を超えてカードを足す', onclick: () => addCard(b.id) }, '＋'));
@@ -995,13 +1027,9 @@ function blockItems(b) {
   return items;
 }
 
+// 休憩の帯（型で決まる位置に出るだけ。押しても動かしても何も起きない）
 function breakEl() {
-  const ld = landedElapsed('break', 'break');
-  return h('button', { type: 'button', class: ld != null ? 'break landed' : 'break', style: ld != null ? `animation-delay:-${ld}ms` : null, onclick: () => {
-    if (Date.now() - lastDragEnd < 400) return;
-    if (ui.lifted) { if (ui.lifted.kind === 'break') cancelLift(); return; }
-    if (confirm('休憩を取り除きますか？')) { work.intermission = null; changed(); }
-  }, onpointerdown: (e) => onItemPointerDown(e, 'break', 'break') }, '休憩');
+  return h('div', { class: 'break' }, '休憩');
 }
 
 function countEl(b, cls) {
@@ -1078,6 +1106,79 @@ function renderMainTabs() {
   return h('div', { class: 'maintabs' }, tab('board', 'ボード'), tab('people', '人物'), tab('core', '芯'), tab('graph', 'グラフ'));
 }
 
+// ---------- 次の一手・思いつきを1行で ----------
+
+// 次にやることを1つ。描画のたびに作品から計算する（持たない）。{ key, kind, text, btn, run } か null
+function nextAction() {
+  if (!work || ui.lifted) return null;
+  const skip = (k) => ui.nextSkip.has(k);
+  const focusKey = (key) => {
+    const el = modalRoot.querySelector(`input[data-key="${key}"], textarea[data-key="${key}"]`);
+    if (el) el.focus();
+  };
+  for (const c of work.pool) {
+    const key = `保留:${c.id}`;
+    if (skip(key)) continue;
+    return { key, kind: '保留', text: `『${cardLabel(c)}』の置き場所を決める`, btn: '置く',
+      run: () => { ui.lifted = { kind: 'card', id: c.id }; syncLift(); } };
+  }
+  const cards = allCards();
+  for (const x of cards) {
+    const key = `変化:${x.card.id}`;
+    if (x.card.change.trim() || skip(key)) continue;
+    return { key, kind: '変化', text: `『${cardLabel(x.card)}』の変化を書く`, btn: '開く',
+      run: () => { openCard(x.card.id); focusKey('change'); } };
+  }
+  const nums = numbering();
+  for (const x of cards) {
+    const key = `見出し:${x.card.id}`;
+    if (x.card.title.trim() || skip(key)) continue;
+    return { key, kind: '見出し', text: `#${nums.get(x.card.id)} の見出しを付ける`, btn: '開く',
+      run: () => { openCard(x.card.id); focusKey('title'); } };
+  }
+  for (let bi = 0; bi < work.blocks.length; bi++) {
+    const b = work.blocks[bi];
+    if (b.cards.length >= SLOTS) continue;
+    const key = `slot:${b.id}`;
+    if (skip(key)) continue;
+    const pb = beatsOn() ? positionBeat(bi, b.cards.length) : null;
+    return { key, kind: '空き枠', text: pb ? `${b.name}「${pb.label}」のカードを足す` : `${b.name}にカードを足す`, btn: '足す',
+      run: () => addCard(b.id) };
+  }
+  return null;
+}
+
+function renderNextBar() {
+  const n = nextAction();
+  if (!n) return null;
+  return h('div', { class: 'nextbar' },
+    h('span', { class: 'next-kind' }, `次：${n.kind}`),
+    h('span', { class: 'next-text' }, n.text),
+    h('button', { type: 'button', class: 'primary next-go', onclick: n.run }, n.btn),
+    h('button', { type: 'button', class: 'link next-later', onclick: () => { ui.nextSkip.add(n.key); renderMain(); } }, 'あとで'));
+}
+
+// 画面の下に貼り付く、思いつきの入力欄。置くと保留の末尾にカードができる
+function renderQuickBar() {
+  const input = h('input', { type: 'text', class: 'quick-input', placeholder: '思いつきを1行で', 'aria-label': '思いつきを1行で',
+    value: ui.quickDraft, enterkeyhint: 'done',
+    oninput: (e) => { ui.quickDraft = e.target.value; } });
+  return h('form', { class: 'quickbar', onsubmit: (e) => {
+    e.preventDefault();
+    const t = input.value.trim();
+    if (!t) return;
+    const c = newCard();
+    c.title = t;
+    work.pool.push(c);
+    ui.landed = { kind: 'card', id: c.id, at: Date.now() };
+    ui.quickDraft = '';
+    changed();
+    showToast('保留に置きました');
+    const again = document.querySelector('.quick-input');
+    if (again) again.focus();
+  } }, input, h('button', { type: 'submit', class: 'primary quick-go' }, '置く'));
+}
+
 function renderBoard() {
   let body;
   if (ui.tab === 'people') {
@@ -1089,11 +1190,14 @@ function renderBoard() {
   } else {
     body = h('div', { class: 'page board' }, renderLegend(), renderColumns());
   }
+  const board = ui.tab !== 'people' && ui.tab !== 'core' && ui.tab !== 'graph';
   return [
     h('div', { class: 'stickyhead' }, renderTopbar(), renderMainTabs()),
     isUnexported(work) && renderExportBar(),
     !ui.storageOk && h('div', { class: 'banner' }, 'この画面では保存できません。閉じると消えます。'),
+    board && renderNextBar(),
     body,
+    board && renderQuickBar(),
   ];
 }
 
@@ -1118,6 +1222,7 @@ function renderMain() {
     if (gw2 && gwScroll != null) gw2.scrollLeft = gwScroll;
     window.scrollTo(0, scrollY);
   }
+  document.body.classList.toggle('has-quick', !!work && ui.tab === 'board');
   syncLift();
   syncLanded();
 }
@@ -1200,7 +1305,7 @@ function entitySection(kind, title, addLabel, promptText) {
 // 人物の行の表示：行＝人物、列＝カード（ボードの順）
 function renderPeopleTable() {
   const nums = numbering();
-  const im = work.intermission;
+  const im = intermissionOf(work);
   // 列を作る。休憩は、そのブロックの index 枚目の前
   const groups = work.blocks.map((b) => {
     const cols = [];
@@ -1312,7 +1417,7 @@ function renderGraphChart(chars, cards, nums) {
     svg.append(s('text', { class: 'g-ylab', x: L - 6, y: yv(v) + 4, 'text-anchor': 'end' }, t)));
 
   // ブロックの境目と名前、休憩
-  const im = work.intermission;
+  const im = intermissionOf(work);
   let off = 0;
   work.blocks.forEach((b, bi) => {
     const n = b.cards.length;
@@ -1703,9 +1808,6 @@ function renderCardSheet() {
         }, title: '種は出発点です。押すたびに入れ替わります。手で書いた文は、置き換える前に確認します。' }, '3つまとめてランダム'))
     : null;
 
-  const im = work.intermission;
-  const breakHere = im && im.blockId === x.block.id && im.index === x.index + 1;
-
   const more = h('details', { class: 'more', open: ui.moreOpen, ontoggle: (e) => { if (e.target === more) ui.moreOpen = more.open; } },
     h('summary', {}, 'その他'),
     beatField(c, x),
@@ -1717,12 +1819,6 @@ function renderCardSheet() {
     stateField(c),
     memoField(c),
     h('div', { class: 'actions' },
-      x.bi < 0 ? null : breakHere
-        ? h('button', { type: 'button', onclick: () => { work.intermission = null; changed(); renderCardSheet(); } }, '休憩を取り除く')
-        : h('button', { type: 'button', onclick: () => {
-            work.intermission = { blockId: x.block.id, index: x.index + 1 };
-            changed(); renderCardSheet();
-          } }, 'このカードの後に休憩を置く'),
       h('span', { class: 'grow' }),
       h('button', { type: 'button', class: 'danger', onclick: () => {
         if (!confirm('このカードを削除しますか？元に戻せません。')) return;
@@ -1788,8 +1884,8 @@ function openSettings() {
         h('label', {}, h('input', { type: 'radio', name: 'stype', value: key, checked: key === work.type,
           onchange: (e) => {
             const msg = key === 'snyder'
-              ? 'スナイダー型に変えます。第2ブロックは「第2幕・前半」になり、空の「第2幕・後半」が加わります。'
-              : '柴型に変えます。「第2幕・前半」と「第2幕・後半」のカードを、第2ブロックにまとめます。';
+              ? '二幕構成に変えます。「破」は「一幕後半・破」になり、空の「二幕前半・破」が加わります。「一幕後半・破」の最後に休憩が入ります。'
+              : '一幕構成に変えます。「一幕後半・破」と「二幕前半・破」のカードを、「破」にまとめます。休憩はなくなります。';
             if (confirm(msg)) changeType(key);
             closeModal(); openSettings();
           } }), t.label))),
@@ -1832,9 +1928,7 @@ const LONG_PRESS_MS = 350;
 function liftedEl() {
   const l = ui.lifted;
   if (!l) return null;
-  return l.kind === 'break'
-    ? document.querySelector('#app .break')
-    : document.querySelector(`#app .card[data-card="${CSS.escape(l.id)}"]`);
+  return document.querySelector(`#app .card[data-card="${CSS.escape(l.id)}"]`);
 }
 
 function clearGaps() {
@@ -1842,11 +1936,10 @@ function clearGaps() {
 }
 
 // カードのあいだ・列の末尾に、置き場所を出す（位置は列の中で決める。カードの並びは動かさない）
-function showGaps(kind) {
+function showGaps() {
   clearGaps();
   document.querySelectorAll('#cols .track').forEach((track) => {
     const bid = track.dataset.block;
-    if (kind === 'break' && bid === 'pool') return; // 休憩は保留に置けない
     let idx = 0, emitted = false, bottom = null;
     const add = (index, y) => track.append(h('button', {
       type: 'button', class: 'drop-gap', dataset: { block: bid, index: String(index) },
@@ -1882,7 +1975,7 @@ function syncLift() {
     return;
   }
   el.classList.add('lifted');
-  showGaps(ui.lifted.kind);
+  showGaps();
   if (!bar) {
     document.body.append(h('div', { class: 'lift-bar', role: 'status' },
       h('span', {}, '置く場所をタップ'),
@@ -1899,7 +1992,7 @@ function cancelLift() {
 // ---------- 動かした直後の［元に戻す］ ----------
 
 function moveSnapshot() {
-  return JSON.stringify({ blocks: work.blocks, pool: work.pool, intermission: work.intermission });
+  return JSON.stringify({ blocks: work.blocks, pool: work.pool });
 }
 
 function clearUndo() {
@@ -1923,7 +2016,6 @@ function undoMove() {
   const rects = layoutRects();
   work.blocks = snap.blocks;
   work.pool = snap.pool;
-  work.intermission = snap.intermission;
   clearUndo();
   if (u.item) ui.landed = { kind: u.item.kind, id: u.item.id, at: Date.now() };
   changed();
@@ -1976,7 +2068,7 @@ function afterMove(item, before, fromRect) {
   const cr = cols.getBoundingClientRect();
   const visible = (r) => r.bottom > 0 && r.top < window.innerHeight && r.right > cr.left && r.left < cr.right;
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const mine = item.kind === 'break' ? 'b' : `c:${item.id}`;
+  const mine = `c:${item.id}`;
   const movers = [];
   let target = null;
   document.querySelectorAll('#cols [data-card], #cols .break').forEach((el) => {
@@ -2017,16 +2109,11 @@ function afterMove(item, before, fromRect) {
   });
 }
 
-// 持ち上げたものを置く（カードはどの列・保留へも、休憩は列の中だけ）。fromRect：ドラッグで離したときのゴーストの位置
+// 持ち上げたカードを置く（どの列・保留へも）。fromRect：ドラッグで離したときのゴーストの位置
 function placeItem(item, blockId, index, fromRect) {
   const before = moveSnapshot();
   const rects = layoutRects();
-  if (item.kind === 'break') {
-    if (blockId === 'pool') return;
-    work.intermission = { blockId, index };
-  } else {
-    moveCard(item.id, blockId, index);
-  }
+  moveCard(item.id, blockId, index);
   if (moveSnapshot() === before) return; // 動いていない
   setUndo(before, { kind: item.kind, id: item.id });
   ui.landed = { kind: item.kind, id: item.id, at: Date.now() };
@@ -2063,7 +2150,7 @@ function liftNow() {
 
 function beginDrag() {
   drag.active = true;
-  if (!document.querySelector('.drop-gap')) showGaps(drag.kind);
+  if (!document.querySelector('.drop-gap')) showGaps();
   document.body.classList.add('dragging-now');
   const r = drag.el.getBoundingClientRect();
   drag.dx = drag.x - r.left;
@@ -2198,4 +2285,11 @@ narrowMq.addEventListener('change', () => renderMain());
 
 ui.storageOk = storageAvailable();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-renderMain();
+// 前回の作品が読めれば、一覧を飛ばして開く
+try {
+  const lastId = localStorage.getItem(LAST_KEY);
+  const lastWork = lastId ? readWork(lastId) : null;
+  if (lastWork) openWork(lastWork);
+  else if (lastId) localStorage.removeItem(LAST_KEY);
+} catch (e) { /* 一覧のまま */ }
+if (!work) renderMain();
