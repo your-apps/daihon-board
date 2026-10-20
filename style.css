@@ -277,12 +277,12 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .maintab.active { background: var(--paper); color: var(--ink); font-weight: 700; border-bottom-color: var(--ink); }
 
 /* ---------- カードの筋（左端の色の帯）と人物（点） ---------- */
-.card .bands { position: absolute; top: 0; bottom: 0; left: 0; width: 4px; display: flex; flex-direction: column; }
+.card .bands { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; display: flex; flex-direction: column; }
 .card .band-seg { flex: 1 1 0; min-height: 0; }
 
 /* ---------- 人物と筋の登録・人物の行の表示 ---------- */
 .pmark { display: inline-block; flex: 0 0 auto; vertical-align: middle; }
-.tmark { display: inline-block; flex: 0 0 auto; width: 4px; height: 14px; border-radius: 2px; vertical-align: middle; }
+.tmark { display: inline-block; flex: 0 0 auto; width: 6px; height: 14px; border-radius: 2px; vertical-align: middle; }
 .people { max-width: 100%; }
 .psec { margin-bottom: 24px; }
 .psec h2 { font-size: 17px; margin: 8px 0; }

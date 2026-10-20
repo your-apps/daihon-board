@@ -4,7 +4,7 @@
 // データは端末内（localStorage）にだけ保存する。外へは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-20c';
+const APP_BUILD = '2026-10-20d';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -14,11 +14,12 @@ const HISTORY_PREFIX = 'daihon-board/history/';  // 版の履歴（新しい順�
 const HISTORY_MAX = 30;
 const AUTO_SNAPSHOT_MS = 10 * 60 * 1000;
 const SLOTS = 10;
-
+// 筋・人物の色（強いトーンにそろえ、色相を均等に離した8色。2026-10-20 くすんだトーンから変更）
 // 筋・人物の色（紙の上で見分けやすい、落ち着いた8色）
-const PALETTE = ['#4a6f96', '#3f8579', '#7d8b3e', '#b8902f', '#7f5f45', '#7b5f99', '#b06483', '#6a9ab0'];
+// 前の版の色（読み込み時に、並び順で新しい色へ移し替える）
 // 古い版の10色（読み込み時に新しい色へ移し替える）
-const OLD_PALETTE = ['#0072b2', '#d55e00', '#009e73', '#cc79a7', '#e69f00', '#7a4fb5', '#56b4e9', '#8c564b', '#666666', '#a89f00'];
+const OLD_PALETTE = ['#0072b2', '#d55e00', '#009e73', '#cc79a7', '#e69f00', '#7a4fb5', '#56b4e9', '#8c564b', '#666666', '#a89f00',
+  '#4a6f96', '#3f8579', '#7d8b3e', '#b8902f', '#7f5f45', '#7b5f99', '#b06483', '#6a9ab0']; // 前の2つの版の色
 // 人物の形（●■▲◆▼✚）。筋には形を付けない
 const SHAPES = ['circle', 'square', 'triangle', 'diamond', 'down', 'cross'];
 
