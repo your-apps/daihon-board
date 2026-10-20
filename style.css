@@ -161,10 +161,20 @@ button.link { border: none; background: none; padding: 6px 4px; color: var(--acc
   word-break: break-all;
 }
 .card .title.empty { color: var(--muted); }
-.card.big { border: 2px solid var(--big); }
 .card.nochange { border-style: dashed; border-color: var(--warn); }
-.card.big.nochange { border-color: var(--big); }
 .card.over { background: #fff6e5; }
+/* 絞り込み：入っているカードはその色の縁、ほかは薄く */
+.card.focus-on { box-shadow: 0 0 0 2px var(--fc), 0 1px 2px rgba(0,0,0,.06); }
+.card.dim { opacity: .28; }
+.card.lifted.dim { opacity: 1; }
+.card.ghost.dim { opacity: .9; }
+.card.ghost { box-shadow: 0 6px 16px rgba(0,0,0,.25); }
+#cols [data-card], #cols .break { scroll-margin: 110px 0 24px; }
+/* 置いた直後：青く光り、約6割は保ってから消える */
+.card.landed, .break.landed { animation: landed 1.6s linear; }
+.break.landed { animation-name: landed-ring; }
+@keyframes landed { 0%, 60% { box-shadow: 0 0 0 3px var(--accent); background-color: #e8f0f8; } }
+@keyframes landed-ring { 0%, 60% { box-shadow: 0 0 0 3px var(--accent); } }
 .card.lifted, .break.lifted { transform: scale(1.04); box-shadow: 0 8px 18px rgba(0,0,0,.28); z-index: 3; position: relative; }
 .card.dragging, .break.dragging { opacity: .3; transform: none; box-shadow: none; }
 /* 型を崩している印：右上の小さな三角 */
@@ -215,7 +225,7 @@ button.link { border: none; background: none; padding: 6px 4px; color: var(--acc
   overflow-y: auto; -webkit-overflow-scrolling: touch;
   background: var(--bg); border-radius: 12px;
   padding: 14px 16px 18px;
-  display: grid; gap: 12px;
+  display: grid; gap: 12px; align-content: start;
 }
 .sheet-head { display: flex; align-items: center; gap: 8px; }
 .sheet-head .where { flex: 1; font-size: 14px; color: var(--muted); text-align: center; }
@@ -263,11 +273,8 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .maintab.active { background: var(--paper); color: var(--ink); font-weight: 700; border-bottom-color: var(--accent); }
 
 /* ---------- カードの筋（左端の色の帯）と人物（点） ---------- */
-.card .bands { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; display: flex; flex-direction: column; }
+.card .bands { position: absolute; top: 0; bottom: 0; left: 0; width: 4px; display: flex; flex-direction: column; }
 .card .band-seg { flex: 1 1 0; min-height: 0; }
-.card .dots { display: flex; flex-wrap: nowrap; align-items: center; gap: 3px; margin-top: 3px; height: 10px; overflow: hidden; flex: 0 0 auto; }
-.card .dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }
-.card .more { font-size: 10px; line-height: 10px; color: var(--muted); white-space: nowrap; }
 
 /* ---------- 人物と筋の登録・人物の行の表示 ---------- */
 .cdot { display: inline-block; flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%; background: var(--c); }
@@ -321,9 +328,20 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 
 @media (max-width: 699px) {
   .overlay { padding: 0; align-items: stretch; }
+  .overlay.bottom { align-items: flex-end; }
   .sheet { max-width: none; border-radius: 0; padding-top: max(14px, env(safe-area-inset-top)); padding-bottom: max(18px, env(safe-area-inset-bottom)); }
   .topbar .type { display: none; }
+  .sheet.small-sheet { border-radius: 16px 16px 0 0; max-height: 90%; padding-bottom: max(18px, env(safe-area-inset-bottom)); }
 }
+@media (min-width: 700px) {
+  .sheet.small-sheet { max-width: 420px; }
+}
+
+/* ---------- 短い確認（閉じる前・読み込み）：ボタンは縦に、幅いっぱい ---------- */
+.small-sheet .actions { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px; }
+.small-sheet .actions button { width: 100%; min-height: 44px; }
+.small-sheet .export-hint { flex: none; margin-top: -4px; text-align: center; }
+button.text-btn { border: none; background: none; color: var(--accent); }
 
 /* ---------- 芯・演出メモ・骨格のコピー ---------- */
 
@@ -384,6 +402,11 @@ p.legend { margin: 0; font-size: 11px; color: var(--muted); }
 
 /* ---------- ボードの凡例 ---------- */
 .board-tools { padding: 0 16px 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.tools-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.focus-chip { min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 14px; display: inline-flex; align-items: center; gap: 6px; }
+.focus-chip .x { color: var(--muted); }
+.lg-btn { min-height: 28px; padding: 0 8px; border: 1px solid transparent; background: transparent; border-radius: 14px; font-size: 12px; }
+.lg-btn.on { border-color: var(--accent); background: #e8f0f8; font-weight: 700; }
 .legend-btn { min-height: 28px; padding: 0 12px; font-size: 12px; color: var(--muted); background: transparent; border-radius: 14px; }
 .board-legend { width: 100%; max-width: 640px; padding: 8px 12px; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 6px; font-size: 12px; color: var(--ink); }
 .lg-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }

@@ -4,7 +4,7 @@
 // データは端末内（localStorage）にだけ保存する。外へは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-19d';
+const APP_BUILD = '2026-10-20a';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const STORE_PREFIX = 'daihon-board/work/';
@@ -44,7 +44,9 @@ const ui = {
   graphOn: {},       // グラフで表示する人物（人物id → true/false）。この画面の中だけ。データには入れない
   lastSnap: null,    // { id, t }：履歴に最後に控えを取った時刻
   lifted: null,      // 持ち上げ中のもの { kind: 'card' | 'break', id }。この画面の中だけ
-  undo: null,        // 動かした直後の［元に戻す］用 { snap, workId, timer }
+  undo: null,        // 動かした直後の［元に戻す］用 { snap, workId, timer, item }
+  landed: null,      // 置いた直後に光らせるもの { kind: 'card' | 'break', id, at }。データには入れない
+  focus: null,       // 筋・人物で絞り込み { kind: 'thread' | 'char', id }。データには入れない
 };
 
 // ---------- 小道具 ----------
@@ -522,6 +524,8 @@ function setStatus(text, error) {
 
 function openWork(w) {
   work = w;
+  ui.landed = null;
+  ui.focus = null;
   ui.newWorkOpen = false;
   ui.tab = 'board';
   pushHistory(w, '開いたとき');
@@ -763,15 +767,15 @@ function showImportConfirm(w, exportedAt) {
     else if (tf === tl) note = h('p', { class: 'import-note' }, 'ファイルと端末内は、同じ版です。');
     else note = h('p', { class: 'import-note' }, 'ファイルのほうが新しい版です。');
   }
-  const sheet = h('div', { class: 'sheet import-sheet', role: 'dialog', 'aria-label': '読み込みの確認' },
+  const sheet = h('div', { class: 'sheet small-sheet import-sheet', role: 'dialog', 'aria-label': '読み込みの確認' },
     h('h2', {}, 'ファイルから読み込む'),
     h('div', { class: 'cmp' }, col('ファイル', w), local && col('この端末', local)),
     note,
     local && h('p', { class: 'note' }, '置き換える前に、端末内の版を控えに残します。'),
     h('div', { class: 'actions' },
       h('button', { type: 'button', class: 'primary import-go', onclick: () => doImport(w, local, exportedAt) }, '読み込む'),
-      h('button', { type: 'button', class: 'import-cancel', onclick: closeModal }, 'やめる')));
-  modalRoot.replaceChildren(overlay(sheet));
+      h('button', { type: 'button', class: 'text-btn import-cancel', onclick: closeModal }, 'やめる')));
+  modalRoot.replaceChildren(overlay(sheet, true));
 }
 
 function doImport(w, local, exportedAt) {
@@ -792,22 +796,24 @@ function doImport(w, local, exportedAt) {
 function doCloseWork() {
   saveNow();
   work = null;
+  ui.landed = null;
+  ui.focus = null;
   closeModal();
   renderMain();
 }
 
 function askBeforeClose() {
-  const sheet = h('div', { class: 'sheet close-sheet', role: 'dialog', 'aria-label': '閉じる前の確認' },
+  const sheet = h('div', { class: 'sheet small-sheet close-sheet', role: 'dialog', 'aria-label': '閉じる前の確認' },
     h('h2', {}, 'まだ書き出していません'),
     h('p', { class: 'note' }, 'この端末には残りますが、ファイルにはまだ残っていません。'),
-    isIOS() && h('small', { class: 'export-hint' }, IOS_HINT),
     h('div', { class: 'actions' },
       h('button', { type: 'button', class: 'primary close-export', onclick: async () => {
         if (await exportWork()) doCloseWork();
       } }, '書き出してから閉じる'),
+      isIOS() && h('small', { class: 'export-hint' }, '次の画面で「“ファイル”に保存」を選ぶ'),
       h('button', { type: 'button', class: 'close-discard', onclick: doCloseWork }, '書き出さずに閉じる'),
-      h('button', { type: 'button', class: 'close-cancel', onclick: closeModal }, 'やめる')));
-  modalRoot.replaceChildren(overlay(sheet));
+      h('button', { type: 'button', class: 'text-btn close-cancel', onclick: closeModal }, 'やめる')));
+  modalRoot.replaceChildren(overlay(sheet, true));
 }
 
 // ---------- 画面：作品の一覧 ----------
@@ -918,9 +924,18 @@ function renderTopbar() {
 function cardEl(c, over, bi, idx) {
   const noChange = !c.change.trim();
   const threads = work.threads.filter((t) => c.threads.includes(t.id));
-  const chars = work.characters.filter((p) => c.characters.includes(p.id));
   const cls = ['card', c.big && 'big', noChange && 'nochange', over && 'over',
-    threads.length && 'has-band', chars.length && 'has-dots'].filter(Boolean);
+    threads.length && 'has-band'].filter(Boolean);
+  const styles = [];
+  // 筋・人物で絞り込み中：入っていないカードは薄く、入っているカードはその色の縁
+  const f = focusEntity();
+  if (f) {
+    if (c[f.kind === 'thread' ? 'threads' : 'characters'].includes(f.id)) { cls.push('focus-on'); styles.push(`--fc:${f.e.color}`); }
+    else cls.push('dim');
+  }
+  // 置いた直後なら、光りかけの途中から続ける
+  const ld = landedElapsed('card', c.id);
+  if (ld != null) { cls.push('landed'); styles.push(`animation-delay:-${ld}ms`); }
   // 型を崩している印：右上の小さな三角（CSSだけ）
   let tip = null;
   if (bi >= 0 && beatsOn() && beatBroken(c, bi, idx)) {
@@ -929,7 +944,7 @@ function cardEl(c, over, bi, idx) {
     tip = `${bt ? bt.label : 'ビートなし'}（型から外れています）`;
   }
   return h('button', {
-    type: 'button', class: cls.join(' '), dataset: { card: c.id }, title: tip,
+    type: 'button', class: cls.join(' '), dataset: { card: c.id }, title: tip, style: styles.length ? styles.join(';') : null,
     onclick: () => {
       if (Date.now() - lastDragEnd < 400) return;
       if (ui.lifted) { if (ui.lifted.kind === 'card' && ui.lifted.id === c.id) cancelLift(); return; } // 持ち上げ中は開かない
@@ -940,10 +955,7 @@ function cardEl(c, over, bi, idx) {
     threads.length > 0 && h('span', { class: 'bands' }, threads.map((t) =>
       h('span', { class: 'band-seg', style: `background:${t.color}`, title: t.name }))),
     c.big && h('span', { class: 'star', title: '大きなイベント' }, '★'),
-    h('span', { class: 'title' + (cardLabel(c) === '（見出しなし）' ? ' empty' : (c.title.trim() ? '' : ' fallback')) }, cardLabel(c)),
-    chars.length > 0 && h('span', { class: 'dots' },
-      chars.slice(0, 6).map((p) => h('span', { class: 'dot', style: `background:${p.color}`, title: p.name })),
-      chars.length > 6 && h('span', { class: 'more' }, `+${chars.length - 6}`)));
+    h('span', { class: 'title' + (cardLabel(c) === '（見出しなし）' ? ' empty' : (c.title.trim() ? '' : ' fallback')) }, cardLabel(c)));
 }
 
 // ブロックの中身（カード・休憩・空き枠）を並べる
@@ -970,7 +982,8 @@ function blockItems(b) {
 }
 
 function breakEl() {
-  return h('button', { type: 'button', class: 'break', onclick: () => {
+  const ld = landedElapsed('break', 'break');
+  return h('button', { type: 'button', class: ld != null ? 'break landed' : 'break', style: ld != null ? `animation-delay:-${ld}ms` : null, onclick: () => {
     if (Date.now() - lastDragEnd < 400) return;
     if (ui.lifted) { if (ui.lifted.kind === 'break') cancelLift(); return; }
     if (confirm('休憩を取り除きますか？')) { work.intermission = null; changed(); }
@@ -990,19 +1003,43 @@ function poolItems() {
   ];
 }
 
-// 凡例：［色］で開閉する。筋の色・人物の色・印の意味
+// 絞り込み中の筋・人物（消えていたら解除）。{ kind, id, e } か null
+function focusEntity() {
+  const f = ui.focus;
+  if (!f || !work) return null;
+  const e = (f.kind === 'thread' ? work.threads : work.characters).find((x) => x.id === f.id);
+  if (!e) { ui.focus = null; return null; }
+  return { kind: f.kind, id: f.id, e };
+}
+
+function toggleFocus(kind, id) {
+  ui.focus = ui.focus && ui.focus.kind === kind && ui.focus.id === id ? null : { kind, id };
+  renderMain();
+}
+
+// 凡例：［色］で開閉する。筋の色・人物の色・印の意味。筋・人物の名前を押すと絞り込む
 function renderLegend() {
   const open = ui.legendOpen;
   const btn = h('button', { type: 'button', class: 'legend-btn', 'aria-expanded': open ? 'true' : 'false',
     onclick: () => { ui.legendOpen = !ui.legendOpen; renderMain(); } }, '色');
-  if (!open) return h('div', { class: 'board-tools' }, btn);
+  const f = focusEntity();
+  const chip = f && h('button', { type: 'button', class: 'focus-chip', 'aria-label': `絞り込みを解除（${f.e.name || '名前なし'}）`,
+    onclick: () => { ui.focus = null; renderMain(); } },
+    h('i', { class: 'lg-dot', style: `background:${f.e.color}` }), f.e.name || '（名前なし）', h('span', { class: 'x' }, '×'));
+  const row = h('div', { class: 'tools-row' }, btn, chip);
+  if (!open) return h('div', { class: 'board-tools' }, row);
   const named = (e) => e.name || '（名前なし）';
-  return h('div', { class: 'board-tools' }, btn,
+  const pick = (kind, e, mark) => {
+    const on = !!f && f.kind === kind && f.id === e.id;
+    return h('button', { type: 'button', class: 'lg-item lg-btn' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false',
+      onclick: () => toggleFocus(kind, e.id) }, mark, named(e));
+  };
+  return h('div', { class: 'board-tools' }, row,
     h('div', { class: 'legend board-legend' },
       work.threads.length > 0 && h('div', { class: 'lg-group' }, h('b', {}, '筋'),
-        work.threads.map((t) => h('span', { class: 'lg-item' }, h('i', { class: 'lg-bar', style: `background:${t.color}` }), named(t)))),
+        work.threads.map((t) => pick('thread', t, h('i', { class: 'lg-bar', style: `background:${t.color}` })))),
       work.characters.length > 0 && h('div', { class: 'lg-group' }, h('b', {}, '人物'),
-        work.characters.map((p) => h('span', { class: 'lg-item' }, h('i', { class: 'lg-dot', style: `background:${p.color}` }), named(p)))),
+        work.characters.map((p) => pick('char', p, h('i', { class: 'lg-dot', style: `background:${p.color}` })))),
       h('div', { class: 'lg-group' }, h('b', {}, '印'),
         h('span', { class: 'lg-item' }, h('i', { class: 'lg-dash' }), '変化 未記入'),
         h('span', { class: 'lg-item' }, h('i', { class: 'lg-tri' }), '型崩し'),
@@ -1068,6 +1105,7 @@ function renderMain() {
     window.scrollTo(0, scrollY);
   }
   syncLift();
+  syncLanded();
 }
 
 // ---------- 画面：人物 ----------
@@ -1352,8 +1390,9 @@ function closeModal() {
   modalRoot.replaceChildren();
 }
 
-function overlay(sheet) {
-  const o = h('div', { class: 'overlay', onclick: (e) => { if (e.target === o) closeModal(); } }, sheet);
+// small が true のときは、短い確認の小さな面（スマホでは下から出る）
+function overlay(sheet, small) {
+  const o = h('div', { class: small ? 'overlay bottom' : 'overlay', onclick: (e) => { if (e.target === o) closeModal(); } }, sheet);
   return o;
 }
 
@@ -1818,28 +1857,119 @@ function clearUndo() {
   document.querySelectorAll('.undo-toast').forEach((el) => el.remove());
 }
 
-function setUndo(snap) {
+function setUndo(snap, item) {
   clearUndo();
   document.body.append(h('div', { class: 'undo-toast', role: 'status' },
     h('span', {}, '移動しました'),
     h('button', { type: 'button', class: 'undo-btn', onclick: undoMove }, '元に戻す')));
-  ui.undo = { snap, workId: work.id, timer: setTimeout(clearUndo, 6000) };
+  ui.undo = { snap, workId: work.id, item, timer: setTimeout(clearUndo, 6000) };
 }
 
 function undoMove() {
   const u = ui.undo;
   if (!u || !work || work.id !== u.workId) { clearUndo(); return; }
   const snap = JSON.parse(u.snap);
+  const rects = layoutRects();
   work.blocks = snap.blocks;
   work.pool = snap.pool;
   work.intermission = snap.intermission;
   clearUndo();
+  if (u.item) ui.landed = { kind: u.item.kind, id: u.item.id, at: Date.now() };
   changed();
+  if (u.item) afterMove(u.item, rects);
 }
 
-// 持ち上げたものを置く（カードはどの列・保留へも、休憩は列の中だけ）
-function placeItem(item, blockId, index) {
+// ---------- 置いた場所が分かる動き ----------
+
+const LANDED_MS = 1600;
+let landedTimer = null;
+
+function landedElapsed(kind, id) {
+  const l = ui.landed;
+  if (!l || l.kind !== kind || l.id !== id) return null;
+  const e = Date.now() - l.at;
+  if (e >= LANDED_MS) { ui.landed = null; return null; }
+  return e;
+}
+
+// 描き直しのあと、光る時間が過ぎたら class を外す
+function syncLanded() {
+  clearTimeout(landedTimer);
+  landedTimer = null;
+  const l = ui.landed;
+  if (!l) return;
+  const left = LANDED_MS - (Date.now() - l.at);
+  if (left <= 0) { ui.landed = null; return; }
+  landedTimer = setTimeout(() => {
+    landedTimer = null;
+    ui.landed = null;
+    document.querySelectorAll('.landed').forEach((el) => { el.classList.remove('landed'); el.style.animationDelay = ''; });
+  }, left + 30);
+}
+
+function layoutKey(el) {
+  return el.classList.contains('break') ? 'b' : `c:${el.dataset.card}`;
+}
+
+// ボード上のカード・休憩の位置（動かす直前に測る）
+function layoutRects() {
+  const m = new Map();
+  document.querySelectorAll('#cols [data-card], #cols .break').forEach((el) => m.set(layoutKey(el), el.getBoundingClientRect()));
+  return m;
+}
+
+// 描き直しのあと：ほかのカードをすべらせて場所を空け、見えない場所なら動かして見せる
+function afterMove(item, before, fromRect) {
+  const cols = document.getElementById('cols');
+  if (!cols) return;
+  const cr = cols.getBoundingClientRect();
+  const visible = (r) => r.bottom > 0 && r.top < window.innerHeight && r.right > cr.left && r.left < cr.right;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const mine = item.kind === 'break' ? 'b' : `c:${item.id}`;
+  const movers = [];
+  let target = null;
+  document.querySelectorAll('#cols [data-card], #cols .break').forEach((el) => {
+    const key = layoutKey(el);
+    const nr = el.getBoundingClientRect();
+    if (key === mine) target = { el, r: nr };
+    if (reduce) return;
+    const old = key === mine && fromRect ? fromRect : before.get(key);
+    if (!old || !visible(old) || !visible(nr)) return;
+    const dx = old.left - nr.left, dy = old.top - nr.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+    movers.push({ el, dx, dy, mine: key === mine });
+  });
+  // 置いた先が見える範囲の外なら、見えるところまで動かす
+  if (target) {
+    const head = document.querySelector('.stickyhead');
+    const top = head ? head.getBoundingClientRect().bottom : 0;
+    const r = target.r;
+    if (r.left < cr.left || r.right > cr.right || r.top < top || r.bottom > window.innerHeight) {
+      target.el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+    }
+  }
+  if (!movers.length) return;
+  movers.forEach((m) => {
+    m.el.style.transition = 'none';
+    m.el.style.transform = `translate(${m.dx}px, ${m.dy}px)`;
+    if (m.mine) m.el.style.zIndex = '2';
+  });
+  void document.body.offsetHeight; // 元の位置をいったん確定させる
+  requestAnimationFrame(() => {
+    movers.forEach((m) => {
+      m.el.style.transition = 'transform .28s ease-out';
+      m.el.style.transform = '';
+    });
+    setTimeout(() => {
+      movers.forEach((m) => { m.el.style.transition = ''; m.el.style.transform = ''; m.el.style.zIndex = ''; });
+    }, 400);
+  });
+}
+
+// 持ち上げたものを置く（カードはどの列・保留へも、休憩は列の中だけ）。fromRect：ドラッグで離したときのゴーストの位置
+function placeItem(item, blockId, index, fromRect) {
   const before = moveSnapshot();
+  const rects = layoutRects();
   if (item.kind === 'break') {
     if (blockId === 'pool') return;
     work.intermission = { blockId, index };
@@ -1847,8 +1977,10 @@ function placeItem(item, blockId, index) {
     moveCard(item.id, blockId, index);
   }
   if (moveSnapshot() === before) return; // 動いていない
-  setUndo(before);
+  setUndo(before, { kind: item.kind, id: item.id });
+  ui.landed = { kind: item.kind, id: item.id, at: Date.now() };
   changed();
+  afterMove(item, rects, fromRect);
 }
 
 function placeLifted(blockId, index) {
@@ -1954,6 +2086,7 @@ function endDrag(drop) {
   cancelAnimationFrame(d.raf);
   document.body.classList.remove('dragging-now');
   if (d.active) {
+    const ghostRect = d.ghost.getBoundingClientRect();
     d.ghost.remove();
     d.el.classList.remove('dragging');
     const cols = document.getElementById('cols');
@@ -1962,7 +2095,7 @@ function endDrag(drop) {
     lastDragEnd = Date.now();
     if (drop && d.target) {
       ui.lifted = null;
-      placeItem({ kind: d.kind, id: d.id }, d.target.blockId, d.target.index);
+      placeItem({ kind: d.kind, id: d.id }, d.target.blockId, d.target.index, ghostRect);
     }
     syncLift();
   } else if (d.lifted) {
