@@ -4,7 +4,7 @@
 // データは端末内（localStorage）にだけ保存する。外へは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-20a';
+const APP_BUILD = '2026-10-20b';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const STORE_PREFIX = 'daihon-board/work/';
@@ -14,8 +14,12 @@ const HISTORY_MAX = 30;
 const AUTO_SNAPSHOT_MS = 10 * 60 * 1000;
 const SLOTS = 10;
 
-// 筋・人物の色（白地で見分けやすい10色。色覚の違いにも配慮した並び）
-const PALETTE = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#E69F00', '#7A4FB5', '#56B4E9', '#8C564B', '#666666', '#A89F00'];
+// 筋・人物の色（紙の上で見分けやすい、落ち着いた8色）
+const PALETTE = ['#4a6f96', '#3f8579', '#7d8b3e', '#b8902f', '#7f5f45', '#7b5f99', '#b06483', '#6a9ab0'];
+// 古い版の10色（読み込み時に新しい色へ移し替える）
+const OLD_PALETTE = ['#0072b2', '#d55e00', '#009e73', '#cc79a7', '#e69f00', '#7a4fb5', '#56b4e9', '#8c564b', '#666666', '#a89f00'];
+// 人物の形（●■▲◆▼✚）。筋には形を付けない
+const SHAPES = ['circle', 'square', 'triangle', 'diamond', 'down', 'cross'];
 
 const TYPES = {
   shiba: { label: '柴型（3段×10枚）', short: '柴型', blocks: ['第1ブロック', '第2ブロック', '第3ブロック'] },
@@ -133,7 +137,11 @@ function normalizeWork(w) {
       id: e.id,
       name: typeof e.name === 'string' ? e.name : '',
       // 色は #RRGGBB だけを受け付ける（style に入れるため、ほかの文字列は通さない）
-      color: typeof e.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(e.color) ? e.color : PALETTE[i % PALETTE.length],
+      color: typeof e.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(e.color)
+        ? (OLD_PALETTE.includes(e.color.toLowerCase()) ? PALETTE[i % PALETTE.length] : e.color)
+        : PALETTE[i % PALETTE.length],
+      // 形は人物だけ。無いか正しくなければ並びの位置で決める
+      ...(key === 'characters' ? { shape: SHAPES.includes(e.shape) ? e.shape : SHAPES[i % SHAPES.length] } : {}),
     }));
   }
   const core = newCore();
@@ -183,8 +191,14 @@ function nextColor(list) {
   return PALETTE.find((col) => !used.has(col)) || PALETTE[list.length % PALETTE.length];
 }
 
+function nextShape(list) {
+  const used = new Set(list.map((e) => e.shape));
+  return SHAPES.find((sh) => !used.has(sh)) || SHAPES[list.length % SHAPES.length];
+}
+
 function addEntity(kind, name) {
   const item = { id: uid(), name: name.trim(), color: nextColor(work[kind]) };
+  if (kind === 'characters') item.shape = nextShape(work[kind]);
   work[kind].push(item);
   return item;
 }
@@ -1025,7 +1039,7 @@ function renderLegend() {
   const f = focusEntity();
   const chip = f && h('button', { type: 'button', class: 'focus-chip', 'aria-label': `絞り込みを解除（${f.e.name || '名前なし'}）`,
     onclick: () => { ui.focus = null; renderMain(); } },
-    h('i', { class: 'lg-dot', style: `background:${f.e.color}` }), f.e.name || '（名前なし）', h('span', { class: 'x' }, '×'));
+    f.kind === 'char' ? personMark(f.e, 12) : threadMark(f.e), f.e.name || '（名前なし）', h('span', { class: 'x' }, '×'));
   const row = h('div', { class: 'tools-row' }, btn, chip);
   if (!open) return h('div', { class: 'board-tools' }, row);
   const named = (e) => e.name || '（名前なし）';
@@ -1037,9 +1051,9 @@ function renderLegend() {
   return h('div', { class: 'board-tools' }, row,
     h('div', { class: 'legend board-legend' },
       work.threads.length > 0 && h('div', { class: 'lg-group' }, h('b', {}, '筋'),
-        work.threads.map((t) => pick('thread', t, h('i', { class: 'lg-bar', style: `background:${t.color}` })))),
+        work.threads.map((t) => pick('thread', t, threadMark(t)))),
       work.characters.length > 0 && h('div', { class: 'lg-group' }, h('b', {}, '人物'),
-        work.characters.map((p) => pick('char', p, h('i', { class: 'lg-dot', style: `background:${p.color}` })))),
+        work.characters.map((p) => pick('char', p, personMark(p, 12)))),
       h('div', { class: 'lg-group' }, h('b', {}, '印'),
         h('span', { class: 'lg-item' }, h('i', { class: 'lg-dash' }), '変化 未記入'),
         h('span', { class: 'lg-item' }, h('i', { class: 'lg-tri' }), '型崩し'),
@@ -1110,17 +1124,37 @@ function renderMain() {
 
 // ---------- 画面：人物 ----------
 
-function colorDot(color) {
-  return h('span', { class: 'cdot', style: `--c:${color}` });
+// 人物の印：その人物の色と形の小さな図形
+function shapeEl(shape, color, size, attrs) {
+  const a = Object.assign({ fill: color }, attrs || {});
+  switch (shape) {
+    case 'square': return s('rect', Object.assign({ x: 2, y: 2, width: 8, height: 8 }, a));
+    case 'triangle': return s('path', Object.assign({ d: 'M6 1.5L11 10.5H1Z' }, a));
+    case 'diamond': return s('path', Object.assign({ d: 'M6 0.8L11.2 6L6 11.2L0.8 6Z' }, a));
+    case 'down': return s('path', Object.assign({ d: 'M1 1.5H11L6 10.5Z' }, a));
+    case 'cross': return s('path', Object.assign({ d: 'M4.2 1H7.8V4.2H11V7.8H7.8V11H4.2V7.8H1V4.2H4.2Z' }, a));
+    default: return s('circle', Object.assign({ cx: 6, cy: 6, r: 5 }, a));
+  }
+}
+function personMark(p, size) {
+  const z = size || 12;
+  return s('svg', { class: 'pmark', width: z, height: z, viewBox: '0 0 12 12', 'aria-hidden': 'true' }, shapeEl(p.shape, p.color));
+}
+// 筋の印：短い縦の棒
+function threadMark(t) {
+  return h('i', { class: 'tmark', style: `background:${t.color}` });
+}
+function entMark(kind, e, size) {
+  return kind === 'characters' ? personMark(e, size) : threadMark(e);
 }
 
 // 名前・色の1行。色ボタンを押すと、その行の下に色と削除の小さな欄が開く
 function entityRow(kind, e) {
   const open = ui.entOpen === e.id;
   const row = h('div', { class: 'ent-row' },
-    h('button', { type: 'button', class: 'ent-color', style: `background:${e.color}`, title: '色を変える', 'aria-label': '色を変える',
+    h('button', { type: 'button', class: 'ent-color', title: kind === 'characters' ? '色と形を変える' : '色を変える', 'aria-label': kind === 'characters' ? '色と形を変える' : '色を変える',
       'aria-expanded': open ? 'true' : 'false',
-      onclick: () => { ui.entOpen = open ? null : e.id; renderMain(); } }),
+      onclick: () => { ui.entOpen = open ? null : e.id; renderMain(); } }, entMark(kind, e, 20)),
     h('input', { type: 'text', class: 'ent-name', value: e.name, 'aria-label': '名前', placeholder: kind === 'characters' ? '人物の名前' : '筋の名前',
       oninput: (ev) => {
         e.name = ev.target.value;
@@ -1135,6 +1169,11 @@ function entityRow(kind, e) {
         h('button', { type: 'button', class: 'swatch' + (e.color === col ? ' on' : ''), style: `background:${col}`,
           'aria-label': `色 ${col}`, 'aria-pressed': e.color === col ? 'true' : 'false',
           onclick: () => { e.color = col; ui.entOpen = null; changed(); } }))),
+      kind === 'characters' && h('div', { class: 'swatches shapes', role: 'group', 'aria-label': '形' }, SHAPES.map((sh) =>
+        h('button', { type: 'button', class: 'swatch shape-btn' + (e.shape === sh ? ' on' : ''), 'data-shape': sh,
+          'aria-label': `形 ${sh}`, 'aria-pressed': e.shape === sh ? 'true' : 'false',
+          onclick: () => { e.shape = sh; changed(); } },
+          personMark({ shape: sh, color: e.color }, 16)))),
       h('button', { type: 'button', class: 'ent-del', onclick: () => {
         const label = kind === 'characters' ? '人物' : '筋';
         if (!confirm(`${label}「${e.name || '名前なし'}」を削除しますか？すべてのカードから外れます。元に戻せません。`)) return;
@@ -1187,7 +1226,7 @@ function renderPeopleTable() {
     const count = allCards().filter((x) => x.card.characters.includes(p.id)).length;
     return h('tr', {},
       h('th', { class: 'rname', scope: 'row' },
-        colorDot(p.color),
+        personMark(p, 12),
         h('span', { class: 'rn', dataset: { pname: p.id } }, p.name || '（名前なし）'),
         h('span', { class: 'cnt' }, `${count}枚`)),
       groups.flatMap((g, gi) => g.cols.map((col, ci) => {
@@ -1196,7 +1235,7 @@ function renderPeopleTable() {
         const c = col.card;
         const on = c.characters.includes(p.id);
         const v = on ? c.states[p.id] : undefined;
-        return h('td', { class: 'pc' + bs, style: `--c:${p.color}`, dataset: { card: c.id, char: p.id },
+        return h('td', { class: 'pc' + (on ? ' on' : '') + bs, dataset: { card: c.id, char: p.id },
           onclick: () => openCard(c.id) },
           v !== undefined ? h('span', { class: 'pv' }, fmtState(v)) : on && h('span', { class: 'pdot' }));
       })));
@@ -1302,19 +1341,18 @@ function renderGraphChart(chars, cards, nums) {
 
   // 人物ごとの階段状の線と点
   const dots = [];
-  work.characters.forEach((p, ci) => {
+  work.characters.forEach((p) => {
     if (!graphVisible(p)) return;
-    const dy = (ci - (work.characters.length - 1) / 2) * 0.06;
     const pts = [];
     cards.forEach((x, i) => { const v = x.card.states[p.id]; if (v !== undefined) pts.push({ i, v, x }); });
     if (!pts.length) return;
-    let d = `M${xc(pts[0].i)} ${yv(pts[0].v + dy)}`;
+    let d = `M${xc(pts[0].i)} ${yv(pts[0].v)}`;
     pts.forEach((pt, k) => {
-      if (k > 0) d += `H${xc(pt.i)}V${yv(pt.v + dy)}`;
+      if (k > 0) d += `H${xc(pt.i)}V${yv(pt.v)}`;
     });
     d += `H${xc(N - 1)}`;
     svg.append(s('path', { class: 'g-line', d, stroke: p.color, 'data-char': p.id }));
-    pts.forEach((pt) => dots.push({ p, pt, cx: xc(pt.i), cy: yv(pt.v + dy) }));
+    pts.forEach((pt) => dots.push({ p, pt, cx: xc(pt.i), cy: yv(pt.v) }));
   });
   dots.forEach(({ p, pt, cx, cy }) => {
     const label = `${p.name || '（名前なし）'} #${nums.get(pt.x.card.id)} ${cardLabel(pt.x.card)} ${fmtState(pt.v).replace('+', '＋')}`;
@@ -1323,7 +1361,7 @@ function renderGraphChart(chars, cards, nums) {
       onclick: open, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } },
       s('title', {}, label),
       s('circle', { class: 'g-hit', cx, cy, r: 11 }),
-      s('circle', { class: 'g-dot', cx, cy, r: 4, fill: p.color })));
+      s('g', { class: 'g-dot', transform: `translate(${cx - 5.5} ${cy - 5.5}) scale(${11 / 12})` }, shapeEl(p.shape, p.color, 12, { stroke: 'var(--paper)', 'stroke-width': 1.5, 'paint-order': 'stroke' }))));
   });
   return svg;
 }
@@ -1345,7 +1383,7 @@ function renderGraph() {
     const has = charHasStates(p);
     return h('button', { type: 'button', class: 'gchip' + (on ? ' on' : '') + (has ? '' : ' none'), 'aria-pressed': on ? 'true' : 'false',
       dataset: { char: p.id }, onclick: () => { ui.graphOn[p.id] = !on; renderMain(); } },
-      colorDot(p.color), h('span', {}, p.name || '（名前なし）'), !has && h('small', {}, '値なし'));
+      personMark(p, 12), h('span', {}, p.name || '（名前なし）'), !has && h('small', {}, '値なし'));
   }));
   return h('div', { class: 'page graph' },
     chips,
@@ -1357,17 +1395,30 @@ function renderGraph() {
 
 function renderCore() {
   const co = work.core;
-  const field = (key, label, hint, multi) => h('label', { class: 'field', dataset: { field: key } },
-    h('span', {}, label),
-    h(multi ? 'textarea' : 'input', { type: multi ? null : 'text', value: co[key], placeholder: hint,
-      oninput: (e) => { co[key] = e.target.value; changed(true); } }));
+  // 高さを中身に合わせる
+  const fit = (el) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; };
+  const area = (key, hint, label) => {
+    const el = h('textarea', { rows: 1, value: co[key], placeholder: hint || '', 'aria-label': label || hint || key,
+      oninput: (e) => { co[key] = e.target.value; fit(e.target); changed(true); } });
+    requestAnimationFrame(() => fit(el));
+    return el;
+  };
+  const line = (key, label, hint) => h('div', { class: 'core-line', dataset: { field: key } },
+    h('span', { class: 'core-lab' }, label), area(key, hint, label));
+  const half = (key, label, hint) => h('div', { class: 'core-half', dataset: { field: key } },
+    h('span', { class: 'core-lab' }, label), area(key, hint, label));
+  const theme = h('div', { class: 'core-theme', dataset: { field: 'theme' } },
+    h('span', { class: 'core-lab' }, 'テーマ'), area('theme', 'テーマを一言', 'テーマ'));
   return h('div', { class: 'page core' },
-    field('protagonist', '主人公'),
-    field('want', '求めるもの', '主人公が求めているもの', true),
-    field('obstacle', '阻むもの', '求めるものを阻むもの', true),
-    field('event', '決定的な出来事', null, true),
-    field('change', '最後の変化', null, true),
-    field('theme', 'テーマを一言'));
+    h('div', { class: 'core-paper' },
+      theme,
+      line('protagonist', '主人公', '主人公'),
+      h('div', { class: 'core-pair' },
+        half('want', '求めるもの', '主人公が求めているもの'),
+        half('obstacle', '阻むもの', '求めるものを阻むもの')),
+      line('event', '決定的な出来事', '決定的な出来事'),
+      h('div', { class: 'core-arrow', 'aria-hidden': 'true' }, '↓'),
+      line('change', '最後の変化', '最後の変化')));
 }
 
 // ---------- カードの詳細 ----------
@@ -1406,7 +1457,7 @@ function chipPicker(c, kind, label, addLabel, promptText) {
         return h('button', { type: 'button', class: 'chip' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false',
           dataset: { id: e.id }, style: `--c:${e.color}`,
           onclick: () => { toggleOnCard(c, kind, e.id); changed(); renderCardSheet(); } },
-          colorDot(e.color), e.name || '（名前なし）');
+          entMark(kind, e, 14), e.name || '（名前なし）');
       }),
       h('button', { type: 'button', class: 'chip add', onclick: () => {
         const name = prompt(promptText);
@@ -1425,7 +1476,7 @@ function stateField(c) {
   return h('div', { class: 'field' },
     h('span', {}, '状態'),
     chars.map((p) => h('div', { class: 'state-row', dataset: { char: p.id } },
-      h('span', { class: 'state-name' }, colorDot(p.color), p.name || '（名前なし）'),
+      h('span', { class: 'state-name' }, personMark(p, 14), p.name || '（名前なし）'),
       h('div', { class: 'seg', role: 'group', 'aria-label': `${p.name || '人物'}の状態` }, values.map((v) => {
         const on = v === null ? c.states[p.id] === undefined : c.states[p.id] === v;
         return h('button', { type: 'button', class: 'seg-btn' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false',
@@ -1448,7 +1499,7 @@ function memoField(c) {
       h('textarea', { value: c.subEvents, oninput: (e) => { c.subEvents = e.target.value; changed(); } })),
     chars.length
       ? chars.map((p) => h('label', { class: 'field', dataset: { intent: p.id } },
-          h('span', {}, colorDot(p.color), `${p.name || '（名前なし）'}の意図`),
+          h('span', {}, personMark(p, 12), `${p.name || '（名前なし）'}の意図`),
           h('input', { type: 'text', value: c.intents[p.id] || '', 'aria-label': `${p.name || '人物'}の意図`,
             oninput: (e) => { c.intents[p.id] = e.target.value; changed(); } })))
       : null);
