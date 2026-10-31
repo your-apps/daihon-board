@@ -1,10 +1,11 @@
 'use strict';
 
 // 台本ボード
-// データは端末内（localStorage）にだけ保存する。外へは何も送らない。
+// データは端末内（localStorage）に保存する。claude.ai の本人専用ページとして開かれたときだけ、
+// 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-20e';
+const APP_BUILD = '2026-10-31c';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -73,6 +74,10 @@ const ui = {
   focus: null,       // 筋・人物で絞り込み { kind: 'thread' | 'char', id }。データには入れない
   nextSkip: new Set(), // 「次の一手」で［あとで］に送った候補のキー。データには入れない
   quickDraft: '',    // 「思いつきを1行で」の書きかけ。データには入れない
+  ideaOpen: null,    // 発想（広い画面）：書く画面で開いているマンダラートのid。データには入れない
+  ideaPick: null,    // 発想（スマホ）：選んでいるマンダラートのid
+  ideaBlock: null,   // 発想（スマホ）：入っている3×3の番号 0..8
+  ideaEdit: null,    // 発想：入力中のマス { m: マンダラートid, i: 添字 }
 };
 
 // ---------- 小道具 ----------
@@ -143,6 +148,8 @@ function newWork(title, type) {
     characters: [],
     core: newCore(),
     showBeats: true, // 型の札（ビート）を表示するか
+    mandalas: [],    // マンダラート { id, cells: 81個の文字 }
+    materials: [],   // 素材 { id, text, src, cards, core }
   };
 }
 
@@ -212,6 +219,42 @@ function normalizeWork(w) {
   };
   for (const b of w.blocks) b.cards = (Array.isArray(b.cards) ? b.cards : []).map(normCard);
   w.pool = (Array.isArray(w.pool) ? w.pool : []).map(normCard);
+  // マンダラート：81マスの文字。外側ブロックの中央は、中心ブロックの同じ言葉（正規の添字 36+b）に寄せる
+  const mIds = new Set();
+  w.mandalas = (Array.isArray(w.mandalas) ? w.mandalas : []).filter((m) => m && typeof m === 'object').map((m) => {
+    const raw = Array.isArray(m.cells) ? m.cells : [];
+    const cells = [];
+    for (let i = 0; i < 81; i++) cells.push(typeof raw[i] === 'string' ? raw[i] : '');
+    for (let b = 0; b < 9; b++) {
+      if (b === 4) continue;
+      const o = b * 9 + 4;
+      if (cells[o]) { if (!cells[36 + b]) cells[36 + b] = cells[o]; cells[o] = ''; }
+    }
+    let id = m.id;
+    if (typeof id !== 'string' || !id || mIds.has(id)) id = uid();
+    mIds.add(id);
+    return { id, cells };
+  });
+  // 素材：言葉・出どころ（印）・結んだカード・芯
+  const mMap = new Map(w.mandalas.map((m) => [m.id, m]));
+  const claimed = new Set();
+  const matIds = new Set();
+  w.materials = (Array.isArray(w.materials) ? w.materials : []).filter((t) => t && typeof t === 'object' && typeof t.text === 'string').map((t) => {
+    let src = null;
+    if (t.src && typeof t.src === 'object') {
+      const m = mMap.get(t.src.m);
+      if (m && Number.isInteger(t.src.i) && t.src.i >= 0 && t.src.i <= 80) {
+        const i = canonIdx(t.src.i);
+        const key = m.id + ':' + i;
+        if (m.cells[i] && !claimed.has(key)) { claimed.add(key); src = { m: m.id, i }; }
+      }
+    }
+    let id = t.id;
+    if (typeof id !== 'string' || !id || matIds.has(id)) id = uid();
+    matIds.add(id);
+    const cards = (Array.isArray(t.cards) ? t.cards : []).filter((cid, i, a) => seen.has(cid) && a.indexOf(cid) === i);
+    return { id, text: t.text, src, cards, core: t.core === true };
+  }).filter((t) => t.src || t.cards.length || t.core || t.text);
   syncIntermission(w);
   return w;
 }
@@ -431,6 +474,7 @@ function deleteCard(cardId) {
   const x = findCard(cardId);
   if (!x) return;
   x.block.cards.splice(x.index, 1);
+  if (Array.isArray(work.materials)) work.materials.forEach((t) => { t.cards = t.cards.filter((id) => id !== cardId); }); // 素材の結びから外す
   changed();
 }
 
@@ -451,9 +495,49 @@ function changeType(type) {
   changed();
 }
 
-// ---------- 保存（端末内） ----------
+// ---------- 保存（端末の控え＋claude.ai） ----------
+// 手元の写し＝メモリ＋localStorage。画面はこの写しを同期の関数で読み書きする。
+// claude.ai のデータベースが使えるときだけ、その裏で書き込み・読み込みをする。
 
 let saveTimer = null;
+
+const SYNCED_PREFIX = 'daihon-board/synced/';       // 最後にデータベースと同じになった版の更新日時
+const PENDING_DEL_KEY = 'daihon-board/pending-delete'; // つながっていない間に消した作品のid
+
+// localStorage に書けなかった分はメモリに持つ（書けたらメモリの分は捨てる）
+const memStore = new Map();
+
+function lsGet(key) {
+  if (memStore.has(key)) return memStore.get(key);
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+
+function lsSet(key, val) {
+  try {
+    localStorage.setItem(key, val);
+    memStore.delete(key);
+    return true;
+  } catch (e) {
+    memStore.set(key, val);
+    return false;
+  }
+}
+
+function lsDel(key) {
+  memStore.delete(key);
+  try { localStorage.removeItem(key); } catch (e) { /* 何もしない */ }
+}
+
+function lsKeys() {
+  const out = new Set(memStore.keys());
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k) out.add(k);
+    }
+  } catch (e) { /* 使えない環境 */ }
+  return [...out];
+}
 
 function storageAvailable() {
   try {
@@ -468,21 +552,532 @@ function storageAvailable() {
 
 function listWorks() {
   const out = [];
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (!k || !k.startsWith(STORE_PREFIX)) continue;
-      try {
-        const w = normalizeWork(JSON.parse(localStorage.getItem(k)));
-        if (w) out.push(w);
-      } catch (e) { /* 壊れた項目は飛ばす */ }
-    }
-  } catch (e) { /* 使えない環境 */ }
+  for (const k of lsKeys()) {
+    if (!k.startsWith(STORE_PREFIX)) continue;
+    try {
+      const w = normalizeWork(JSON.parse(lsGet(k)));
+      if (w) out.push(w);
+    } catch (e) { /* 壊れた項目は飛ばす */ }
+  }
   return out.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
 }
 
+// ---------- claude.ai のデータベース ----------
+// 置き場所（本人だけが読める data/users/<uid>/board の下）：
+//   works/<作品id> … 作品のデータ　meta/<作品id> … 書き出しの状態
+//   history/<作品id>/v/<控えの時刻> … 版の履歴（1版＝1文書。新しい順に30件）
+// claude.ai の外・ログインなしでは cloud.state が 'on' にならず、端末だけで今までどおり動く。
+
+const cloud = {
+  expected: false,   // claude.ai の中で開かれていそう（window.claude がある）。つながるまでは端末だけ
+  state: 'off',      // 'on'＝データベースにつながっている
+  failed: false,     // 直近の書き込みが失敗した
+  base: null,        // data/users/<uid>/board の文書
+  dl: null,          // downloads（使えないときは null）
+  dirty: new Set(),  // まだデータベースに書いていない作品のid
+  timers: new Map(), // 作品ごとの、約0.4秒まとめて書くタイマー
+  pending: new Map(), // 他の端末で直された作品（入力が終わってから取り込む）
+  watchId: null,
+  unwatch: null,
+};
+const cq = { ops: new Map(), running: false }; // 書き込みの待ち行列（1つずつ順に実行）
+
+function tsOf(s) {
+  const t = Date.parse(s);
+  return isNaN(t) ? 0 : t;
+}
+
+function cloneJson(o) {
+  return JSON.parse(JSON.stringify(o));
+}
+
+const wRef = (id) => cloud.base.collection('works').doc(id);
+const mRef = (id) => cloud.base.collection('meta').doc(id);
+const hCol = (id) => cloud.base.collection('history').doc(id).collection('v');
+
+function syncedAt(id) {
+  return lsGet(SYNCED_PREFIX + id);
+}
+
+function setSynced(id, at) {
+  if (at && tsOf(at) >= tsOf(syncedAt(id))) lsSet(SYNCED_PREFIX + id, at);
+}
+
+// データベースに書いていない変更がある（データベースと同じ版になったことがない）
+function hasUnsynced(w) {
+  return syncedAt(w.id) !== w.updatedAt;
+}
+
+// 上の表示（保存の状態）の文字と、赤にするか
+function statusLabel() {
+  if (ui.saveError) return ['保存できませんでした', true];
+  if (saveTimer) return ['保存中…', false];
+  if (cloud.state === 'on') {
+    if (cloud.failed) return ['同期できません', true];
+    if (cloud.dirty.size || cq.ops.size || cq.running) return ['保存中…', false];
+    return ['保存済み', false];
+  }
+  if (cloud.expected) return ['端末にだけ保存', false];
+  return ['端末に保存済み', false];
+}
+
+function refreshStatus() {
+  const [text, err] = statusLabel();
+  setStatus(text, err);
+  if (typeof syncExportBar === "function") syncExportBar();
+}
+
+// ----- 書き込みの待ち行列 -----
+
+function cloudQueue(key, run) {
+  if (cloud.state !== 'on') return;
+  cq.ops.set(key, run);
+  cloudRun();
+  refreshStatus();
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function withRetry(run) {
+  try {
+    return await run();
+  } catch (e) {
+    if (e && e.code === 'unavailable') { await sleep(600 + Math.random() * 600); return run(); }
+    throw e;
+  }
+}
+
+async function cloudRun() {
+  if (cq.running) return;
+  cq.running = true;
+  try {
+    while (cq.ops.size) {
+      const [key, run] = cq.ops.entries().next().value;
+      cq.ops.delete(key);
+      try {
+        await withRetry(run);
+        cloud.failed = false;
+      } catch (e) {
+        if (key.startsWith('w:') || key.startsWith('m:')) {
+          cloud.failed = true;
+          // 一時的な失敗だけ、あとでやり直す（容量超過などは次の変更まで待つ）
+          const retriable = e && (e.code === 'unavailable' || e.code === 'resource_exhausted');
+          if (retriable && key.startsWith('w:')) setTimeout(() => cloudMarkDirty(key.slice(2)), 15000);
+        }
+      }
+      refreshStatus();
+    }
+  } finally {
+    cq.running = false;
+    refreshStatus();
+  }
+}
+
+// ----- 作品を書く（約0.4秒まとめて、変わったときだけ） -----
+
+function cloudMarkDirty(id) {
+  if (cloud.state !== 'on') return;
+  const l = readWork(id);
+  if (!l || syncedAt(id) === l.updatedAt) return;
+  cloud.dirty.add(id);
+  if (!cloud.timers.has(id)) {
+    cloud.timers.set(id, setTimeout(() => { cloud.timers.delete(id); cloudFlush(id); }, 400));
+  }
+  refreshStatus();
+}
+
+function clearCloudDirty(id) {
+  cloud.dirty.delete(id);
+  clearTimeout(cloud.timers.get(id));
+  cloud.timers.delete(id);
+  cq.ops.delete('w:' + id);
+}
+
+function cloudFlush(id) {
+  if (cloud.state !== 'on' || !cloud.dirty.has(id)) return;
+  if (cloud.pending.has(id)) return; // 他の端末の新しい版を取り込むまで、上書きしない
+  cloudQueue('w:' + id, async () => {
+    const l = readWork(id);
+    if (!l) { cloud.dirty.delete(id); return; }
+    if (syncedAt(id) !== l.updatedAt) {
+      await wRef(id).set(cloneJson(l));
+      setSynced(id, l.updatedAt);
+    }
+    const cur = readWork(id);
+    if (!cur || cur.updatedAt === l.updatedAt) cloud.dirty.delete(id);
+  });
+}
+
+function cloudFlushAll() {
+  for (const id of [...cloud.dirty]) {
+    clearTimeout(cloud.timers.get(id));
+    cloud.timers.delete(id);
+    cloudFlush(id);
+  }
+}
+
+// ----- 他の端末の変更を受け取る -----
+
+// 文字入力・ドラッグの最中か。この間は、他の端末の変更で画面を描き直さない
+function syncBusy() {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'TEXTAREA'
+    || (a.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|range|color|file)$/.test(a.type)))) return true;
+  return !!drag;
+}
+
+function syncKick(ms) {
+  clearTimeout(ui.syncPoll);
+  ui.syncPoll = setTimeout(syncTick, ms == null ? 500 : ms);
+}
+
+function syncTick() {
+  ui.syncPoll = null;
+  if (!cloud.pending.size && !ui.renderPending) return;
+  if (syncBusy()) { syncKick(); return; }
+  applyPending();
+  if (ui.renderPending) {
+    ui.renderPending = false;
+    if (!work) renderMain();
+  }
+}
+
+// 一覧の描き直し（入力が終わってから）
+function softRender() {
+  if (work) return;
+  ui.renderPending = true;
+  syncKick(60);
+}
+
+function takeRemoteWork(raw) {
+  try {
+    const w = normalizeWork(cloneJson(raw));
+    return w && typeof w.id === 'string' && w.id ? w : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 作品を端末の控えに書く（データベースへは書かない）
+function writeLocalWork(w) {
+  syncIntermission(w);
+  const data = JSON.stringify(w);
+  for (let tries = 0; tries < 8; tries++) {
+    if (lsSet(STORE_PREFIX + w.id, data)) return true;
+    if (!trimHistories()) return false;
+  }
+  return false;
+}
+
+// データベースにある作品を受け取る。端末より新しければ、端末に取り込む
+function receiveRemote(remote) {
+  const id = remote.id;
+  const isOpen = !!work && work.id === id;
+  const local = isOpen ? work : readWork(id);
+  if (!local) {
+    writeLocalWork(remote);
+    setSynced(id, remote.updatedAt);
+    softRender();
+    return;
+  }
+  const rt = tsOf(remote.updatedAt);
+  const lt = tsOf(local.updatedAt);
+  if (rt < lt) return; // こちらのほうが新しい（書き込みの待ちに任せる）
+  if (rt === lt) { setSynced(id, local.updatedAt); return; }
+  if (isOpen) {
+    cloud.pending.set(id, remote);
+    if (syncBusy()) syncKick(); else applyPending();
+    return;
+  }
+  if (hasUnsynced(local)) pushHistory(local, '同期の前の控え', true);
+  writeLocalWork(remote);
+  setSynced(id, remote.updatedAt);
+  softRender();
+}
+
+// 開いている作品を、他の端末の新しい版に合わせる
+function applyPending() {
+  const remote = work ? cloud.pending.get(work.id) : null;
+  cloud.pending.clear();
+  if (!remote) return;
+  if (tsOf(remote.updatedAt) <= tsOf(work.updatedAt)) { cloudMarkDirty(work.id); return; } // 入力中にこちらが新しくなった
+  // こちらに書き残しがあれば（データベースに上がっていない・この画面で直したあと）、履歴に残してから合わせる
+  if (hasUnsynced(work) || ui.editedSinceSync) pushHistory(work, '同期の前の控え', true);
+  ui.editedSinceSync = false;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  clearCloudDirty(remote.id);
+  writeLocalWork(remote);
+  setSynced(remote.id, remote.updatedAt);
+  work = remote;
+  ui.newCardId = null;
+  renderMain();
+  if (ui.openCardId) {
+    if (findCard(ui.openCardId)) renderCardSheet();
+    else { ui.openCardId = null; modalRoot.replaceChildren(); }
+  } else if (ui.settingsOpen) {
+    openSettings();
+  }
+}
+
+function receiveMeta(id, raw) {
+  let r;
+  try { r = cloneJson(raw); } catch (e) { return; }
+  if (!r || typeof r !== 'object' || !r.lastExportedAt) return;
+  const l = readMeta(id);
+  if (tsOf(r.lastExportedAt) <= tsOf(l.lastExportedAt)) return;
+  lsSet(META_PREFIX + id, JSON.stringify({ lastExportedAt: r.lastExportedAt, exportedUpdatedAt: r.exportedUpdatedAt }));
+  if (work && work.id === id) syncExportBar(); else softRender();
+}
+
+// 開いている作品の文書と書き出しの状態を見張る
+function cloudWatch(id) {
+  if (cloud.state !== 'on') return;
+  if (cloud.watchId === id && cloud.unwatch) return;
+  cloudUnwatch();
+  if (!id) return;
+  try {
+    const a = wRef(id).onSnapshot((snap) => {
+      if (!snap.exists) return;
+      const r = takeRemoteWork(snap.data());
+      if (r && r.id === id) receiveRemote(r);
+    }, () => {});
+    const b = mRef(id).onSnapshot((snap) => { if (snap.exists) receiveMeta(id, snap.data()); }, () => {});
+    cloud.watchId = id;
+    cloud.unwatch = () => { a(); b(); };
+  } catch (e) {
+    cloud.watchId = null;
+    cloud.unwatch = null;
+  }
+}
+
+function cloudUnwatch() {
+  if (cloud.unwatch) { try { cloud.unwatch(); } catch (e) { /* 何もしない */ } }
+  cloud.unwatch = null;
+  cloud.watchId = null;
+}
+
+// ----- 戻ったとき・開いている間の読み直し（見張りが届かないときの備え） -----
+
+const POLL_FAST_MS = 5000;
+const POLL_SLOW_MS = 30000;
+const poll = { timer: null, slow: false, busy: false, resumeTimer: null, syncing: false };
+
+// 開いている作品の文書と書き出しの状態を読み、見張りの受け取りと同じ処理に渡す
+async function cloudRefreshOpen() {
+  if (cloud.state !== 'on' || !work || poll.busy) return;
+  const id = work.id;
+  poll.busy = true;
+  try {
+    const [a, b] = await Promise.all([wRef(id).get(), mRef(id).get()]);
+    if (!work || work.id !== id) return;
+    if (a && a.exists) {
+      const r = takeRemoteWork(a.data());
+      if (r && r.id === id) receiveRemote(r);
+    }
+    if (b && b.exists) receiveMeta(id, b.data());
+  } catch (e) {
+    if (e && e.code === 'resource_exhausted' && !poll.slow) { poll.slow = true; cloudPollSchedule(); }
+  } finally {
+    poll.busy = false;
+  }
+}
+
+function cloudPollStop() {
+  clearTimeout(poll.timer);
+  poll.timer = null;
+}
+
+// 作品を開いていて画面が見えているあいだだけ、5秒ごと（断られたら30秒ごと）に読み直す
+function cloudPollSchedule() {
+  cloudPollStop();
+  if (cloud.state !== 'on' || !work || document.visibilityState === 'hidden') return;
+  poll.timer = setTimeout(async () => {
+    poll.timer = null;
+    await cloudRefreshOpen();
+    cloudPollSchedule();
+  }, poll.slow ? POLL_SLOW_MS : POLL_FAST_MS);
+}
+
+// アプリに戻ったとき、すぐ読み直す（短時間に重なったら1回）
+function cloudResume() {
+  clearTimeout(poll.resumeTimer);
+  poll.resumeTimer = setTimeout(async () => {
+    poll.resumeTimer = null;
+    if (cloud.state !== 'on' || document.visibilityState === 'hidden') return;
+    cloudFlushAll();
+    if (work) {
+      await cloudRefreshOpen();
+    } else if (!poll.syncing) {
+      poll.syncing = true;
+      try { await cloudSync(); } catch (e) { /* 黙って次の機会に */ }
+      poll.syncing = false;
+    }
+    cloudPollSchedule();
+  }, 150);
+}
+
+// ----- 版の履歴 -----
+
+let lastHistAt = 0;
+function nextHistoryAt() {
+  let t = Date.now();
+  if (t <= lastHistAt) t = lastHistAt + 1;
+  lastHistAt = t;
+  return new Date(t).toISOString();
+}
+
+function cloudQueueHistory(id, entry, dropped) {
+  if (cloud.state !== 'on') return;
+  const snap = cloneJson(entry);
+  cloudQueue('h:' + id + ':' + entry.at, () => hCol(id).doc(entry.at).set(snap));
+  dropped.forEach((e) => cloudQueue('h:' + id + ':' + e.at, () => hCol(id).doc(e.at).delete()));
+}
+
+// データベースの履歴を、端末の履歴と合わせる（新しい順に30件まで。足りない側へ補う）
+async function syncHistory(id) {
+  if (cloud.state !== 'on') return;
+  try {
+    const snap = await hCol(id).orderBy('at', 'desc').limit(HISTORY_MAX + 10).get();
+    const remote = snap.docs.map((d) => cloneJson(d.data()))
+      .filter((e) => e && typeof e.at === 'string' && e.work && typeof e.work === 'object');
+    const local = readHistory(id);
+    const haveAt = new Set(local.map((e) => e.at));
+    const merged = local.slice();
+    let added = false;
+    remote.forEach((e) => { if (!haveAt.has(e.at)) { merged.push(e); added = true; } });
+    merged.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    const keep = merged.slice(0, HISTORY_MAX);
+    const drop = merged.slice(HISTORY_MAX);
+    if (added || drop.length) writeHistory(id, keep);
+    const remoteAt = new Set(remote.map((e) => e.at));
+    keep.forEach((e) => {
+      if (!remoteAt.has(e.at)) {
+        const c = cloneJson(e);
+        cloudQueue('h:' + id + ':' + e.at, () => hCol(id).doc(c.at).set(c));
+      }
+    });
+    drop.forEach((e) => {
+      if (remoteAt.has(e.at)) cloudQueue('h:' + id + ':' + e.at, () => hCol(id).doc(e.at).delete());
+    });
+    if (added && ui.settingsOpen && work && work.id === id && !syncBusy()) openSettings();
+  } catch (e) { /* 履歴の同期は、失敗しても本体に響かせない */ }
+}
+
+// ----- 作品の削除 -----
+
+function cloudDeleteWork(id, ats) {
+  if (cloud.state !== 'on') return;
+  for (const k of [...cq.ops.keys()]) {
+    if (k === 'w:' + id || k === 'm:' + id || k.startsWith('h:' + id + ':')) cq.ops.delete(k);
+  }
+  cloudQueue('dw:' + id, () => wRef(id).delete());
+  cloudQueue('dm:' + id, () => mRef(id).delete());
+  cloudQueue('dh:' + id, async () => {
+    const snap = await hCol(id).get();
+    const all = new Set(snap.docs.map((d) => d.id).concat(ats || []));
+    for (const at of all) await hCol(id).doc(at).delete();
+  });
+}
+
+// ----- つなぐ -----
+
+async function cloudInit() {
+  const c = window.claude;
+  if (!c || typeof c.use !== 'function') return; // claude.ai の外：端末だけ
+  cloud.expected = true;
+  refreshStatus();
+  // 応答がなければ最大10秒で null（起動は待たせない）
+  const cap = (name) => new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), 10000);
+    let p;
+    try { p = Promise.resolve(c.use(name)); } catch (e) { p = Promise.resolve(null); }
+    p.then((v) => { clearTimeout(t); resolve(v || null); }, () => { clearTimeout(t); resolve(null); });
+  });
+  cap('downloads').then((v) => { cloud.dl = v; });
+  const [db, user] = await Promise.all([cap('db'), cap('user')]);
+  let uid = null;
+  if (db && user) {
+    try { uid = await Promise.race([user.id(), sleep(10000).then(() => null)]); } catch (e) { uid = null; }
+  }
+  if (!db || typeof uid !== 'string' || !uid) { // つながらない（ログインなしなど）：端末だけ
+    cloud.expected = false;
+    refreshStatus();
+    return;
+  }
+  cloud.base = db.doc('data/users/' + uid + '/board');
+  cloudConnect(0);
+}
+
+async function cloudConnect(attempt) {
+  try {
+    await cloudSync();
+  } catch (e) {
+    cloud.state = 'off';
+    refreshStatus();
+    if (attempt < 3) setTimeout(() => cloudConnect(attempt + 1), 20000);
+  }
+}
+
+// データベースの作品・書き出しの状態を読み、端末と新しい方に合わせる
+async function cloudSync() {
+  const [ws, ms] = await Promise.all([
+    cloud.base.collection('works').get(),
+    cloud.base.collection('meta').get(),
+  ]);
+  cloud.state = 'on';
+  cloud.failed = false;
+  // つながっていない間に消した作品は、データベースからも消す
+  const gone = new Set(readJson(PENDING_DEL_KEY, []));
+  gone.forEach((id) => cloudDeleteWork(id));
+  lsDel(PENDING_DEL_KEY);
+
+  const remoteTs = new Map();
+  ws.docs.forEach((d) => {
+    if (gone.has(d.id)) return;
+    const r = takeRemoteWork(d.data());
+    if (!r || r.id !== d.id) return;
+    remoteTs.set(r.id, tsOf(r.updatedAt));
+    receiveRemote(r);
+  });
+  const remoteMeta = new Map();
+  ms.docs.forEach((d) => {
+    if (gone.has(d.id)) return;
+    remoteMeta.set(d.id, d.data());
+    receiveMeta(d.id, d.data());
+  });
+  // 端末のほうが新しいもの・データベースに無いものを書く
+  const localWorks = work ? listWorks().filter((w) => w.id !== work.id).concat([work]) : listWorks();
+  localWorks.forEach((l) => {
+    if (remoteTs.has(l.id)) {
+      if (tsOf(l.updatedAt) > remoteTs.get(l.id)) cloudMarkDirty(l.id);
+    } else if (!syncedAt(l.id)) {
+      cloudMarkDirty(l.id); // 初めて上げる（一度つながって消えたものは上げ直さない）
+    }
+  });
+  lsKeys().filter((k) => k.startsWith(META_PREFIX)).forEach((k) => {
+    const id = k.slice(META_PREFIX.length);
+    const l = readMeta(id);
+    if (!l.lastExportedAt || gone.has(id)) return;
+    const r = remoteMeta.get(id);
+    if (!r || tsOf(l.lastExportedAt) > tsOf(r.lastExportedAt)) {
+      const m = cloneJson(l);
+      cloudQueue('m:' + id, () => mRef(id).set(m));
+    }
+  });
+  if (work) { cloudWatch(work.id); syncHistory(work.id); }
+  cloudPollSchedule();
+  softRender();
+  refreshStatus();
+}
+
+// ---------- 保存（作品） ----------
+
 function changed(skipRender) {
   work.updatedAt = new Date().toISOString();
+  ui.editedSinceSync = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 300);
   setStatus('保存中…');
@@ -500,7 +1095,7 @@ function saveNow() {
     return;
   }
   ui.saveError = false;
-  setStatus('端末に保存済み');
+  refreshStatus();
   // 本体の保存が済んでから、履歴を足す（履歴の失敗は本体に響かせない）
   if (!ui.lastSnap || ui.lastSnap.id !== work.id || Date.now() - ui.lastSnap.t > AUTO_SNAPSHOT_MS) {
     pushHistory(work, '自動');
@@ -510,17 +1105,9 @@ function saveNow() {
 // 作品そのものを保存する。容量が足りなければ、履歴を古いほうから減らして保存し直す
 // （履歴が端末の容量を埋めて、本体が保存できなくなるのを防ぐ）。
 function writeMainWork(w) {
-  syncIntermission(w);
-  const data = JSON.stringify(w);
-  for (let tries = 0; tries < 8; tries++) {
-    try {
-      localStorage.setItem(STORE_PREFIX + w.id, data);
-      return true;
-    } catch (e) {
-      if (!trimHistories()) return false;
-    }
-  }
-  return false;
+  const ok = writeLocalWork(w);
+  cloudMarkDirty(w.id); // claude.ai につながっていれば、約1秒まとめてデータベースへ
+  return ok || cloud.state === 'on';
 }
 
 // すべての作品の履歴を、古いほうから半分に減らす。減らせたら true。
@@ -569,19 +1156,39 @@ function openWork(w) {
   ui.tab = 'board';
   ui.nextSkip = new Set();
   ui.quickDraft = '';
+  ui.ideaOpen = null;
+  ui.ideaPick = null;
+  ui.ideaBlock = null;
+  ui.ideaEdit = null;
+  ui.editedSinceSync = false;
   try { localStorage.setItem(LAST_KEY, w.id); } catch (e) { /* 書けなくても無視 */ }
   pushHistory(w, '開いたとき');
   renderMain();
+  cloudWatch(w.id);   // 別の端末での変更を見張る
+  poll.slow = false;
+  cloudPollSchedule();
+  syncHistory(w.id);
 }
 
 // 作品のデータ（本体・書き出しの控え・履歴）を端末から消す
 function deleteWorkData(id) {
   try {
     if (localStorage.getItem(LAST_KEY) === id) localStorage.removeItem(LAST_KEY);
-    localStorage.removeItem(STORE_PREFIX + id);
-    localStorage.removeItem(META_PREFIX + id);
-    localStorage.removeItem(HISTORY_PREFIX + id);
   } catch (e) { /* 何もしない */ }
+  const ats = readHistory(id).map((e) => e.at);
+  lsDel(STORE_PREFIX + id);
+  lsDel(META_PREFIX + id);
+  lsDel(HISTORY_PREFIX + id);
+  lsDel(SYNCED_PREFIX + id);
+  cloud.pending.delete(id);
+  clearCloudDirty(id);
+  if (cloud.watchId === id) cloudUnwatch();
+  if (cloud.state === 'on') {
+    cloudDeleteWork(id, ats);
+  } else if (cloud.expected) { // つながっていない間に消した分は、つながったときにデータベースからも消す
+    const list = readJson(PENDING_DEL_KEY, []);
+    if (Array.isArray(list) && !list.includes(id)) { list.push(id); lsSet(PENDING_DEL_KEY, JSON.stringify(list)); }
+  }
 }
 
 // 削除の確認文（一覧と設定で共通）
@@ -595,7 +1202,7 @@ function confirmDeleteWork(w) {
 
 function closeWork() {
   saveNow();
-  if (work && isUnexported(work)) askBeforeClose();
+  if (work && exportUrgent(work)) askBeforeClose();
   else doCloseWork();
 }
 
@@ -603,7 +1210,7 @@ function closeWork() {
 
 function readJson(key, fallback) {
   try {
-    const v = JSON.parse(localStorage.getItem(key));
+    const v = JSON.parse(lsGet(key));
     return v == null ? fallback : v;
   } catch (e) {
     return fallback;
@@ -616,12 +1223,36 @@ function readMeta(id) {
 }
 
 function writeMeta(id, meta) {
-  try { localStorage.setItem(META_PREFIX + id, JSON.stringify(meta)); } catch (e) { /* 控えの失敗は無視 */ }
+  lsSet(META_PREFIX + id, JSON.stringify(meta)); // 控えの失敗は無視
+  const m = cloneJson(meta);
+  cloudQueue('m:' + id, () => mRef(id).set(m)); // 書き出しの状態は端末どうしで共通
 }
 
 // 最後に書き出した版から変わっていれば「未書き出し」
 function isUnexported(w) {
   return readMeta(w.id).exportedUpdatedAt !== w.updatedAt;
+}
+
+// 書き出しの基準の日時（最後に書き出した日時。無ければ作品を作った日時）
+function exportBaseTime(w) {
+  const m = readMeta(w.id);
+  const t = tsOf(m.lastExportedAt) || tsOf(w.createdAt);
+  return t || null;
+}
+
+// 基準から今までの日数（切り捨て）。基準が分からなければ null
+function daysSinceExport(w) {
+  const t = exportBaseTime(w);
+  if (t == null) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+}
+
+// 急いで書き出す必要があるか：未書き出しで、claude.ai に保存できていない、または7日以上たっている
+function exportUrgent(w) {
+  if (!isUnexported(w)) return false;
+  if (cloud.state !== 'on' || cloud.failed) return true;
+  const d = daysSinceExport(w);
+  return d != null && d >= 7;
 }
 
 // 保留のカードも数える（読み込みの新旧比べや履歴で、保留だけの違いも見分けるため）
@@ -630,7 +1261,7 @@ function cardCount(w) {
 }
 
 function readWork(id) {
-  try { return normalizeWork(JSON.parse(localStorage.getItem(STORE_PREFIX + id))); } catch (e) { return null; }
+  try { return normalizeWork(JSON.parse(lsGet(STORE_PREFIX + id))); } catch (e) { return null; }
 }
 
 function readHistory(id) {
@@ -642,12 +1273,8 @@ function readHistory(id) {
 function writeHistory(id, arr) {
   const list = arr.slice(0, HISTORY_MAX);
   while (list.length) {
-    try {
-      localStorage.setItem(HISTORY_PREFIX + id, JSON.stringify(list));
-      return true;
-    } catch (e) {
-      list.pop();
-    }
+    if (lsSet(HISTORY_PREFIX + id, JSON.stringify(list))) return true;
+    list.pop();
   }
   return false;
 }
@@ -663,7 +1290,9 @@ function pushHistory(w, reason, force) {
     }
     ui.lastSnap = { id: w.id, t: Date.now() };
     syncIntermission(w);
-    hist.unshift({ at: new Date().toISOString(), reason, cards: cardCount(w), updatedAt: w.updatedAt, work: w });
+    const entry = { at: nextHistoryAt(), reason, cards: cardCount(w), updatedAt: w.updatedAt, work: w };
+    hist.unshift(entry);
+    cloudQueueHistory(w.id, entry, hist.slice(HISTORY_MAX)); // 31件目以降はデータベースからも消す
     return writeHistory(w.id, hist);
   } catch (e) {
     return false;
@@ -716,7 +1345,16 @@ async function exportWork() {
   ui.exporting = true;
   let ok = false;
   try {
-    if (isIOS() && navigator.canShare && navigator.canShare({ files: [file] })) {
+    if (cloud.dl && typeof cloud.dl.save === 'function') {
+      // claude.ai の中：保存を頼む（断られたら書き出していない扱い）
+      try {
+        await cloud.dl.save({ filename: file.name, data: body });
+        ok = true;
+      } catch (e) {
+        if (e && (e.code === 'declined' || e.code === 'rate_limited')) return false;
+      }
+    }
+    if (!ok && isIOS() && navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({ files: [file] });
         ok = true;
@@ -725,7 +1363,7 @@ async function exportWork() {
         downloadFile(file);
         ok = true;
       }
-    } else {
+    } else if (!ok) {
       downloadFile(file);
       ok = true;
     }
@@ -739,10 +1377,27 @@ async function exportWork() {
   return ok;
 }
 
+// 帯の種類と文：急ぎは朱（保存できていなければ「未書き出し」、7日以上なら「N日 書き出していません」）。急ぎでなければ控えめ
+function exportBarInfo(w) {
+  const urgent = exportUrgent(w);
+  const d = daysSinceExport(w);
+  const meta = readMeta(w.id);
+  let text;
+  if (urgent) {
+    text = cloud.state !== 'on' || cloud.failed ? '未書き出し' : `${d}日 書き出していません`;
+  } else if (!meta.lastExportedAt) {
+    text = '書き出し：まだ';
+  } else {
+    text = d === 0 ? '書き出し：今日' : `書き出し：${d}日前`;
+  }
+  return { urgent, text };
+}
+
 function renderExportBar() {
-  return h('div', { class: 'export-bar', role: 'status' },
-    h('span', { class: 'export-msg' }, '未書き出し'),
-    h('button', { type: 'button', class: 'primary export-btn', onclick: exportWork }, '書き出す'));
+  const info = exportBarInfo(work);
+  return h('div', { class: 'export-bar' + (info.urgent ? '' : ' calm'), role: 'status' },
+    h('span', { class: 'export-msg' }, info.text),
+    h('button', { type: 'button', class: info.urgent ? 'primary export-btn' : 'export-btn', onclick: exportWork }, '書き出す'));
 }
 
 // 文字入力中（描き直さないとき）も、帯の出し入れだけは行う
@@ -755,6 +1410,9 @@ function syncExportBar() {
     if (m) m.after(renderExportBar());
   } else if (!need && cur) {
     cur.remove();
+  } else if (need && cur) {
+    const info = exportBarInfo(work);
+    if (cur.classList.contains('calm') === info.urgent || cur.querySelector('.export-msg').textContent !== info.text) cur.replaceWith(renderExportBar());
   }
 }
 
@@ -826,6 +1484,11 @@ function showImportConfirm(w, exportedAt) {
 function doImport(w, local, exportedAt) {
   if (local && !pushHistory(local, '読み込み前の控え', true)
     && !confirm('端末内の版の控えを残せませんでした。それでも読み込みますか？')) return;
+  // claude.ai につながっているとき、ファイルがデータベースの版より古いと、読み込んだ内容が
+  // すぐ新しい版に戻されてしまう。読み込みは本人の操作なので、更新日時を今にして新しい版として扱う
+  if (cloud.state === 'on' && tsOf(w.updatedAt) < Math.max(tsOf(local && local.updatedAt), tsOf(syncedAt(w.id)))) {
+    w.updatedAt = new Date().toISOString();
+  }
   if (!writeMainWork(w)) {
     alert('端末に保存できませんでした。読み込みを取りやめました。');
     return;
@@ -841,6 +1504,9 @@ function doImport(w, local, exportedAt) {
 function doCloseWork() {
   saveNow();
   work = null;
+  cloudUnwatch();
+  cloudPollStop();
+  cloud.pending.clear();
   ui.landed = null;
   ui.focus = null;
   closeModal();
@@ -922,7 +1588,7 @@ function renderWorks() {
               h('span', { class: 'w-title' }, w.title || '無題'),
               h('span', { class: 'w-date' }, formatDate(w.updatedAt)),
               h('span', { class: 'w-meta' }, `${TYPES[w.type] ? TYPES[w.type].short : ''}・${n}枚`,
-                isUnexported(w) && h('span', { class: 'w-tag' }, '未書き出し'))),
+                exportUrgent(w) && h('span', { class: 'w-tag' }, '未書き出し'))),
             h('button', { type: 'button', class: 'work-del', 'aria-label': `「${w.title || '無題'}」を削除`, onclick: () => {
               if (!confirmDeleteWork(w)) return;
               deleteWorkData(w.id);
@@ -963,7 +1629,7 @@ function renderTopbar() {
     h('button', { type: 'button', class: 'link', onclick: closeWork }, '‹ 一覧'),
     h('button', { type: 'button', class: 'title-btn', onclick: openSettings, title: '作品の設定' }, work.title || '無題'),
     h('span', { class: 'type' }, TYPES[work.type].short),
-    h('span', { id: 'status', class: 'status' }, '端末に保存済み'));
+    h('span', { id: 'status', class: 'status' }, statusLabel()[0]));
 }
 
 function cardEl(c, over, bi, idx) {
@@ -1013,7 +1679,6 @@ function blockItems(b) {
     if (i === imIndex) items.push(breakEl());
     items.push(cardEl(c, i >= SLOTS, bi, i));
   });
-  if (imIndex === b.cards.length) items.push(breakEl());
   for (let i = b.cards.length; i < SLOTS; i++) {
     // 空き枠には、置き場所のビートを薄い札で出す。＋は最初の空き枠だけ
     // 次の空き枠だけ点線の箱、それより後ろは枠線のない「道しるべ」
@@ -1025,6 +1690,8 @@ function blockItems(b) {
   if (b.cards.length >= SLOTS) {
     items.push(h('button', { type: 'button', class: 'slot add-over', 'aria-label': '枠を超えてカードを足す', onclick: () => addCard(b.id) }, '＋'));
   }
+  // 休憩がカードの末尾にあるときは、空き枠・＋のあとの、列のいちばん終わりに出す
+  if (imIndex === b.cards.length) items.push(breakEl());
   return items;
 }
 
@@ -1075,7 +1742,10 @@ function renderLegend() {
   const pick = (kind, e, mark) => {
     const on = !!f && f.kind === kind && f.id === e.id;
     return h('button', { type: 'button', class: 'lg-item lg-btn' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false',
-      onclick: () => toggleFocus(kind, e.id) }, mark, named(e));
+      onclick: () => {
+        if (window.matchMedia('(max-width: 699px)').matches) ui.legendOpen = false; // スマホでは選んだら閉じる
+        toggleFocus(kind, e.id);
+      } }, mark, named(e));
   };
   return h('div', { class: 'board-tools' }, row,
     h('div', { class: 'legend board-legend' },
@@ -1104,7 +1774,7 @@ function renderColumns() {
 function renderMainTabs() {
   const tab = (key, label) => h('button', { type: 'button', class: 'maintab' + (ui.tab === key ? ' active' : ''),
     dataset: { tab: key }, onclick: () => { if (ui.tab !== key) { ui.tab = key; renderMain(); window.scrollTo(0, 0); } } }, label);
-  return h('div', { class: 'maintabs' }, tab('board', 'ボード'), tab('people', '人物'), tab('core', '芯'), tab('graph', 'グラフ'));
+  return h('div', { class: 'maintabs' }, tab('board', 'ボード'), tab('people', '人物'), tab('core', '芯'), tab('graph', 'グラフ'), tab('idea', '発想'));
 }
 
 // ---------- 次の一手・思いつきを1行で ----------
@@ -1177,7 +1847,7 @@ function renderQuickBar() {
     showToast('保留に置きました');
     const again = document.querySelector('.quick-input');
     if (again) again.focus();
-  } }, input, h('button', { type: 'submit', class: 'primary quick-go' }, '置く'));
+  } }, input, h('button', { type: 'submit', class: 'primary quick-go' }, '保留へ'));
 }
 
 function renderBoard() {
@@ -1188,10 +1858,12 @@ function renderBoard() {
     body = renderCore();
   } else if (ui.tab === 'graph') {
     body = renderGraph();
+  } else if (ui.tab === 'idea') {
+    body = renderIdea();
   } else {
     body = h('div', { class: 'page board' }, renderLegend(), renderColumns());
   }
-  const board = ui.tab !== 'people' && ui.tab !== 'core' && ui.tab !== 'graph';
+  const board = ui.tab !== 'people' && ui.tab !== 'core' && ui.tab !== 'graph' && ui.tab !== 'idea';
   return [
     h('div', { class: 'stickyhead' }, renderTopbar(), renderMainTabs()),
     isUnexported(work) && renderExportBar(),
@@ -1211,18 +1883,23 @@ function renderMain() {
   const pwScroll = pw ? [pw.scrollLeft, pw.scrollTop] : null;
   const gw = document.querySelector('.gchart-wrap');
   const gwScroll = gw ? gw.scrollLeft : null;
+  const ir = document.querySelector('.idea-rail');
+  const irScroll = ir ? ir.scrollLeft : null;
   app.replaceChildren(...[].concat(work ? renderBoard() : renderWorks()).filter(Boolean));
   if (work) {
-    if (saveTimer) setStatus('保存中…');
-    else if (ui.saveError) setStatus('保存できませんでした', true);
+    refreshStatus();
     const cols2 = document.getElementById('cols');
     if (cols2 && colsScroll) cols2.scrollLeft = colsScroll;
     const pw2 = document.querySelector('.ptable-wrap');
     if (pw2 && pwScroll) { pw2.scrollLeft = pwScroll[0]; pw2.scrollTop = pwScroll[1]; }
     const gw2 = document.querySelector('.gchart-wrap');
     if (gw2 && gwScroll != null) gw2.scrollLeft = gwScroll;
+    const ir2 = document.querySelector('.idea-rail');
+    if (ir2 && irScroll) ir2.scrollLeft = irScroll;
     window.scrollTo(0, scrollY);
+    ideaPagerPlace();
   }
+  syncIdeaBar();
   document.body.classList.toggle('has-quick', !!work && ui.tab === 'board');
   syncLift();
   syncLanded();
@@ -1466,7 +2143,7 @@ function renderGraphChart(chars, cards, nums) {
     svg.append(s('g', { class: 'g-pt', tabindex: 0, role: 'button', 'aria-label': label, 'data-card': pt.x.card.id, 'data-char': p.id,
       onclick: open, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } },
       s('title', {}, label),
-      s('circle', { class: 'g-hit', cx, cy, r: 11 }),
+      s('circle', { class: 'g-hit', cx, cy, r: 12 }),
       s('g', { class: 'g-dot', transform: `translate(${cx - 5.5} ${cy - 5.5}) scale(${11 / 12})` }, shapeEl(p.shape, p.color, 12, { stroke: 'var(--paper)', 'stroke-width': 1.5, 'paint-order': 'stroke' }))));
   });
   return svg;
@@ -1515,6 +2192,7 @@ function renderCore() {
     h('span', { class: 'core-lab' }, label), area(key, hint, label));
   const theme = h('div', { class: 'core-theme', dataset: { field: 'theme' } },
     h('span', { class: 'core-lab' }, 'テーマ'), area('theme', 'テーマを一言', 'テーマ'));
+  const coreMats = work.materials.filter((t) => t.core);
   return h('div', { class: 'page core' },
     h('div', { class: 'core-paper' },
       theme,
@@ -1524,9 +2202,709 @@ function renderCore() {
         half('obstacle', '阻むもの', '求めるものを阻むもの')),
       line('event', '決定的な出来事', '決定的な出来事'),
       h('div', { class: 'core-arrow', 'aria-hidden': 'true' }, '↓'),
-      line('change', '最後の変化', '最後の変化')));
+      line('change', '最後の変化', '最後の変化')),
+    coreMats.length > 0 && h('div', { class: 'core-mats' }, h('span', { class: 'core-lab' }, '拾った言葉'),
+      h('div', { class: 'mat-tags' }, coreMats.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id },
+        onclick: () => openMaterial(t.id) }, t.text || '（空）')))));
 }
 
+// ---------- 画面：発想（マンダラートと拾った言葉） ----------
+// マンダラートは9×9。添字 = 段(ブロック)*9 + マス（左上から右へ 0..8、4 が中央）。
+// 外側ブロックの中央は、中心ブロックの同じ言葉と同じもの。保存も印も正規の添字（36+b）だけを使う。
+
+function canonIdx(i) {
+  const b = Math.floor(i / 9);
+  return b !== 4 && i % 9 === 4 ? 36 + b : i;
+}
+
+function cellText(m, i) { return m.cells[canonIdx(i)] || ''; }
+function mandalaName(m) { return m.cells[40].trim() || '（名前なし）'; }
+function mandalaById(id) { return work.mandalas.find((m) => m.id === id) || null; }
+function materialById(id) { return work.materials.find((t) => t.id === id) || null; }
+function materialAt(m, i) {
+  const c = canonIdx(i);
+  return work.materials.find((t) => t.src && t.src.m === m.id && t.src.i === c) || null;
+}
+function hasTies(t) { return t.core || t.cards.length > 0; }
+
+// 結び先の言い方（「カード 3, 7」「芯」）
+function tieParts(t) {
+  const num = numbering();
+  const parts = [];
+  const nos = t.cards.filter((id) => findCard(id)).map((id) => num.get(id) || 0).sort((a, b) => (a || 1e9) - (b || 1e9));
+  if (nos.length) parts.push('カード ' + nos.map((n) => n || '保留').join(', '));
+  if (t.core) parts.push('芯');
+  return parts;
+}
+
+function ideaClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function newMandalaObj() { return { id: uid(), cells: Array(81).fill('') }; }
+
+// 新しいマンダラートを末尾に作り、中心のマスを入力中にして開く
+function addMandalaAndOpen() {
+  const m = newMandalaObj();
+  work.mandalas.push(m);
+  ui.ideaEdit = { m: m.id, i: 40 };
+  ui.ideaBlock = 4;
+  if (narrowMq.matches) ui.ideaPick = m.id; else ui.ideaOpen = m.id;
+  changed();
+  ideaFocus();
+}
+
+function dropMaterial(t) {
+  work.materials = work.materials.filter((x) => x !== t);
+  changed();
+}
+
+function deleteMandala(m) {
+  work.materials = work.materials.filter((t) => {
+    if (!t.src || t.src.m !== m.id) return true;
+    if (hasTies(t)) { t.src = null; return true; }
+    return false;
+  });
+  work.mandalas = work.mandalas.filter((x) => x !== m);
+  ui.ideaOpen = null;
+  ui.ideaBlock = null;
+  ui.ideaEdit = null;
+  if (ui.ideaPick === m.id) ui.ideaPick = null;
+  changed();
+}
+
+function confirmDeleteMandala(m) {
+  ideaConfirm('このマンダラートを消しますか？',
+    `「${mandalaName(m)}」を消します。結びのある拾った言葉は、出どころなしで残ります。`, '消す', () => { deleteMandala(m); ideaShut(); }, ideaShut);
+}
+
+// マスの言葉を確定する。印のある拾った言葉の言葉も合わせる。変わったら true
+function commitCell(m, raw, value) {
+  const i = canonIdx(raw);
+  const v = value.trim();
+  if (m.cells[i] === v) return false;
+  m.cells[i] = v;
+  const t = materialAt(m, i);
+  if (t) {
+    if (v) t.text = v;
+    else if (hasTies(t)) t.src = null;            // 結びがあれば、出どころなしで残す
+    else work.materials = work.materials.filter((x) => x !== t);
+  }
+  return true;
+}
+
+// 印を付ける・外す（結びがあるときは、外す前に確かめる）
+function toggleMark(m, raw) {
+  const i = canonIdx(raw);
+  if (i === 40 || !m.cells[i]) return;
+  const t = materialAt(m, i);
+  if (!t) {
+    work.materials.push({ id: uid(), text: m.cells[i], src: { m: m.id, i }, cards: [], core: false });
+    changed();
+    return;
+  }
+  if (hasTies(t)) {
+    ideaConfirm('印を外しますか？', `「${t.text}」は${tieParts(t).join('・')}に結ばれています。外すと拾った言葉から消え、結びも切れます。`,
+      '外す', () => { dropMaterial(t); ideaShut(); }, ideaShut);
+    return;
+  }
+  dropMaterial(t);
+}
+
+// 同じブロックの、次の空いたマス（なければ null）
+function nextEmptyCell(m, raw) {
+  const b = Math.floor(raw / 9), k = raw % 9;
+  for (let step = 1; step < 9; step++) {
+    const kk = (k + step) % 9;
+    if (!cellText(m, b * 9 + kk)) return b * 9 + kk;
+  }
+  return null;
+}
+
+// ----- 下の入力欄（キーボードの真上）-----
+// 入力欄は #app の外に1つだけ。描き直しで作り直さない（作り直すと iOS でキーボードが閉じる）。
+// ideaCur = いま入力欄が持っているマス { work, m, raw, key }。データは確定まで変えない。
+
+let ideaBar = null;
+let ideaCur = null;
+
+function ensureIdeaBar() {
+  if (ideaBar) return ideaBar;
+  const label = h('span', { class: 'ibar-label' });
+  const input = h('input', { type: 'text', class: 'ibar-input', 'aria-label': 'マスの言葉', enterkeyhint: 'next',
+    autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
+    oninput: ideaLiveText,
+    onkeydown: (e) => {
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      ideaNext();
+    },
+    onblur: () => {
+      // 押された相手のクリックを先に通してから閉じる
+      setTimeout(() => {
+        if (!ideaCur || document.activeElement === input) return;
+        const ch = ideaEndEdit();
+        if (ch) changed(); else renderMain();
+      }, 200);
+    } });
+  const keep = (e) => e.preventDefault();   // ボタンを押しても入力欄から focus を奪わない
+  const next = h('button', { type: 'button', class: 'primary ibar-next', onmousedown: keep, onclick: ideaNext }, '次へ');
+  const done = h('button', { type: 'button', class: 'ibar-done', onmousedown: keep, onclick: () => {
+    const ch = ideaEndEdit();
+    if (ch) changed(); else renderMain();
+  } }, '完了');
+  const el = h('div', { id: 'idea-bar', role: 'group', 'aria-label': 'マスの言葉を書く' }, label, input, next, done);
+  el.inert = true;
+  document.body.append(el);
+  ideaBar = { el, input, label };
+  return ideaBar;
+}
+
+// 見えている画面の下端にぴったり付ける
+function placeIdeaBar() {
+  if (!ideaBar) return;
+  if (!narrowMq.matches) {
+    // 広い画面：3×3 の真上の置き場（.idea-slot）に、ページの座標で重ねる。画面の動きには追わせない
+    const el = ideaBar.el;
+    el.classList.add('wide');
+    el.classList.remove('kb');
+    const slot = document.querySelector('.idea-slot');
+    if (slot) {
+      const r = slot.getBoundingClientRect();
+      el.style.top = (r.top + window.scrollY) + 'px';
+      el.style.left = (r.left + window.scrollX) + 'px';
+      el.style.width = r.width + 'px';
+    }
+    el.style.bottom = 'auto';
+    document.documentElement.style.setProperty('--ibar-pad', el.classList.contains('on') ? '40vh' : '0px');
+    return;
+  }
+  ideaBar.el.classList.remove('wide');
+  ideaBar.el.style.top = '';
+  ideaBar.el.style.left = '';
+  ideaBar.el.style.width = '';
+  const vv = window.visualViewport;
+  const off = vv ? Math.max(0, Math.round(window.innerHeight - (vv.height + vv.offsetTop))) : 0;
+  ideaBar.el.style.bottom = off + 'px';
+  ideaBar.el.classList.toggle('kb', off > 40);
+  document.documentElement.style.setProperty('--ibar-pad', (ideaBar.el.offsetHeight + off) + 'px');
+}
+
+// 入力欄の中身を、いまのマスに確定する。keep なら入力を続ける。変わったら true
+function ideaCommit(keep) {
+  if (!ideaCur || !ideaBar) return false;
+  const c = ideaCur;
+  if (!keep) ideaCur = null;
+  if (c.work !== work || !work.mandalas.includes(c.m)) return false;
+  return commitCell(c.m, c.raw, ideaBar.input.value);
+}
+
+// 確定して入力を終える（キーボードも閉じる）。変わったら true
+function ideaEndEdit() {
+  const ch = ideaCommit(false);
+  ui.ideaEdit = null;
+  if (ideaBar && ideaBar.input === document.activeElement) ideaBar.input.blur();
+  return ch;
+}
+
+function ideaStopEdit() {
+  if (!ideaCur && !ui.ideaEdit) return;
+  const ch = ideaEndEdit();
+  if (ch) changed(true);
+  syncIdeaBar();
+}
+
+// 押した操作の前に確定して入力欄を閉じ、操作をして描き直す
+function ideaGo(fn) {
+  const ch = ideaEndEdit();
+  fn();
+  if (ch) changed(); else renderMain();
+}
+
+function ideaFocus() {
+  if (!ideaBar || !ideaCur) return;
+  ideaBar.input.focus({ preventScroll: true });
+  try { ideaBar.input.setSelectionRange(ideaBar.input.value.length, ideaBar.input.value.length); } catch (e) { /* 何もしない */ }
+  placeIdeaBar();
+  ideaEnsureVisible();
+}
+
+// 書いているマスが、帯とキーボードの上に見えるように画面を動かす
+function ideaEnsureVisible() {
+  if (!ideaBar || !ideaCur) return;
+  if (!narrowMq.matches) {
+    // 広い画面：入力欄が画面の上の方（上から 0〜40%）に見えるようにする。キーボードは下から出る
+    const rb = ideaBar.el.getBoundingClientRect();
+    const vw = window.visualViewport;
+    const vTop = vw ? vw.offsetTop : 0;
+    const vH = vw ? vw.height : window.innerHeight;
+    const shd = document.querySelector('.stickyhead');
+    const topLim = vTop + (shd ? shd.offsetHeight : 0) + 8;
+    const maxTop = vTop + vH * 0.4;
+    if (rb.top > maxTop || rb.top < topLim) window.scrollBy(0, rb.top - Math.max(topLim, Math.min(maxTop, topLim + 8)));
+    return;
+  }
+  const cell = document.querySelector(`.nb-cell .mcell[data-i="${ideaCur.raw}"]`);
+  if (!cell) return;
+  const r = cell.getBoundingClientRect();
+  const vv = window.visualViewport;
+  const top = vv ? vv.offsetTop : 0;
+  const bottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
+  const limit = bottom - ideaBar.el.offsetHeight - 8;
+  const sh = document.querySelector('.stickyhead');
+  const topLimit = top + (sh ? sh.offsetHeight : 0) + 8;
+  if (r.bottom > limit) window.scrollBy(0, r.bottom - limit);
+  else if (r.top < topLimit) window.scrollBy(0, r.top - topLimit);
+}
+
+// 打った文字を、マスの表示にも映す（データは確定まで変えない）
+function ideaLiveText() {
+  if (!ideaCur || !ideaBar) return;
+  const cell = document.querySelector(`.nb-cell .mcell[data-i="${ideaCur.raw}"]`);
+  if (!cell) return;
+  const v = ideaBar.input.value.trim();
+  const tx = cell.querySelector('.mtxt');
+  if (tx) tx.textContent = v;
+  cell.classList.toggle('has', !!v);
+  cell.classList.toggle('empty', !v);
+}
+
+// 描き直しのたびに、入力欄の表示・値・ラベルだけを更新する
+function syncIdeaBar() {
+  let want = null;
+  if (work && ui.tab === 'idea' && ui.ideaEdit && !modalRoot.firstChild && ui.ideaBlock != null) {
+    const m = mandalaById(ui.ideaEdit.m);
+    const owner = narrowMq.matches ? ui.ideaPick : ui.ideaOpen;
+    if (m && owner === m.id && Math.floor(ui.ideaEdit.i / 9) === ui.ideaBlock) want = { m, raw: ui.ideaEdit.i };
+  }
+  if (!want) {
+    if (ideaCur) { if (ideaCommit(false)) changed(true); }
+    ui.ideaEdit = null;
+    if (ideaBar) {
+      ideaBar.el.classList.remove('on');
+      ideaBar.el.inert = true;
+      ideaBar.el.style.bottom = narrowMq.matches ? '0px' : 'auto';
+      ideaBar.el.classList.toggle('wide', !narrowMq.matches);
+    }
+    document.body.classList.remove('idea-editing');
+    return;
+  }
+  const bar = ensureIdeaBar();
+  const key = `${want.m.id}:${want.raw}`;
+  if (!ideaCur || ideaCur.key !== key) {
+    if (ideaCur && ideaCommit(false)) changed(true);
+    bar.input.value = cellText(want.m, want.raw);
+    ideaCur = { work, m: want.m, raw: want.raw, key };
+  }
+  const b = Math.floor(want.raw / 9);
+  bar.label.textContent = (b === 4 ? '中心' : (cellText(want.m, b * 9 + 4) || '（未記入）')) + ' ›';
+  bar.el.inert = false;
+  bar.el.classList.add('on');
+  document.body.classList.add('idea-editing');
+  placeIdeaBar();
+}
+
+// マスを押す：いまのマスを確定し、押したマスを書く状態にする（押した処理の中で focus する）
+function startEdit(m, raw) {
+  if (ideaCur && ideaCur.m === m && ideaCur.raw === raw) { ideaFocus(); return; }
+  const ch = ideaCommit(true);
+  ui.ideaEdit = { m: m.id, i: raw };
+  if (ch) changed(); else renderMain();
+  ideaFocus();
+}
+
+// ［次へ］・Enter：確定して、同じブロックの次の空いたマスへ。なければ次のマス
+function ideaNext() {
+  if (!ideaCur) return;
+  const c = ideaCur;
+  const ch = ideaCommit(true);
+  let nx = nextEmptyCell(c.m, c.raw);
+  if (nx == null) { const b = Math.floor(c.raw / 9), k = c.raw % 9; nx = b * 9 + (k + 1) % 9; }
+  ui.ideaEdit = { m: c.m.id, i: nx };
+  if (ch) changed(); else renderMain();
+  ideaFocus();
+}
+
+// ○：いまのマスを確定してから、印を付け外す
+function ideaToggleMark(m, raw) {
+  const ch = ideaCommit(true);
+  const t = materialAt(m, raw);
+  if (t && hasTies(t)) {                   // 確かめの面が出る。先に入力を閉じる
+    ideaEndEdit();
+    if (ch) changed(true);
+    renderMain();
+    toggleMark(m, raw);
+    return;
+  }
+  if (ch) changed(true);
+  toggleMark(m, raw);
+}
+
+// マス1つ。o = { tag, big, editable, onclick }
+function ideaCell(m, raw, o) {
+  const i = canonIdx(raw);
+  const b = Math.floor(raw / 9), k = raw % 9;
+  const editing = !!(o.editable && ui.ideaEdit && ui.ideaEdit.m === m.id && ui.ideaEdit.i === raw);
+  const draft = editing && ideaCur && ideaCur.m === m && ideaCur.raw === raw && ideaBar ? ideaBar.input.value.trim() : null;
+  const txt = draft != null ? draft : m.cells[i];
+  const isKey = (b === 4 && k !== 4) || (b !== 4 && k === 4);
+  const marked = i !== 40 && !!materialAt(m, i);
+  const cls = ['mcell', txt ? 'has' : 'empty', raw === 40 && 'name', txt && isKey && 'key', marked && 'mark', o.big && 'big', editing && 'editing'];
+  const tag = o.tag || 'button';
+  return h(tag, { class: cls.filter(Boolean).join(' '), type: tag === 'button' ? 'button' : null, dataset: { i: raw },
+    'aria-label': txt ? `${txt}${marked ? '（印あり）' : ''}` : '空いたマス', onclick: o.onclick,
+    onmousedown: o.editable ? (e) => { if (ideaCur) e.preventDefault(); } : null },
+    h('span', { class: 'mtxt' }, txt));
+}
+
+// 9×9 を1枚。o = { c: マスの大きさ(px), tag, onCell(raw), onBlock(b) }
+function mandalaEl(m, o) {
+  const c = o.c;
+  const fs = ideaClamp(Math.round(c * 0.27), 10, 18);
+  const wrap = h('div', { class: 'mandala' + (o.pad ? ' pad' : ''), dataset: { id: m.id }, style: `--mc:${c}px;--mfs:${fs}px` });
+  for (let b = 0; b < 9; b++) {
+    const blk = h(o.onBlock ? 'button' : 'div', { class: 'mblock' + (o.onBlock ? ' mblock-btn' : '') + (o.sel === b ? ' sel' : ''), type: o.onBlock ? 'button' : null,
+      dataset: { b }, 'aria-label': o.onBlock ? `ブロック ${b + 1}` : null, onclick: o.onBlock ? () => o.onBlock(b) : null });
+    for (let k = 0; k < 9; k++) {
+      const raw = b * 9 + k;
+      blk.append(ideaCell(m, raw, { tag: o.tag, onclick: o.onCell ? () => o.onCell(raw) : null }));
+    }
+    wrap.append(blk);
+  }
+  return wrap;
+}
+
+// ----- 拾った言葉の一覧・札 -----
+
+function matPanel() {
+  const list = work.materials;
+  return h('aside', { class: 'mat-panel', 'aria-label': '拾った言葉の一覧' },
+    h('div', { class: 'mat-head' }, h('strong', {}, '拾った言葉'), h('span', { class: 'mat-count' }, `${list.length}件`)),
+    h('p', { class: 'mat-sub' }, '印を付けた言葉。カードにできる'),
+    list.map((t) => {
+      const m = t.src ? mandalaById(t.src.m) : null;
+      const sub = [m && mandalaName(m)].concat(tieParts(t)).filter(Boolean).join('・');
+      return h('button', { type: 'button', class: 'mat-item', dataset: { id: t.id }, onclick: () => openMaterial(t.id) },
+        h('strong', {}, t.text || '（空）'), sub && h('small', {}, sub));
+    }),
+    h('button', { type: 'button', class: 'mat-new ibtn', onclick: addFreeMaterial }, '＋ 書いて足す'));
+}
+
+function matTags() {
+  return h('div', { class: 'mat-tags idea-mats' },
+    work.materials.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id }, onclick: () => openMaterial(t.id) }, t.text || '（空）')),
+    h('button', { type: 'button', class: 'mat-tag add mat-new', 'aria-label': '書いて拾った言葉を足す', onclick: addFreeMaterial }, '＋'));
+}
+
+// ----- 画面本体 -----
+
+function renderIdea() {
+  // 画面の広さが変わっても、どのマンダラートのどの3×3かが引き継がれるようにそろえる
+  if (narrowMq.matches) {
+    if (ui.ideaOpen) { ui.ideaPick = ui.ideaOpen; ui.ideaOpen = null; if (ui.ideaBlock == null) ui.ideaBlock = 4; }
+  } else {
+    if (!ui.ideaOpen && ui.ideaBlock != null && ui.ideaPick) ui.ideaOpen = ui.ideaPick;
+    if (ui.ideaOpen && ui.ideaBlock == null) ui.ideaBlock = 4;
+    if (!ui.ideaOpen) ui.ideaBlock = null;
+  }
+  return h('div', { class: 'page idea' }, narrowMq.matches ? renderIdeaNarrow() : renderIdeaWide());
+}
+
+// 3×3 の画面（広い画面もスマホも同じ形）
+function ideaBlockView(m, wide, S) {
+  const b = ui.ideaBlock;
+  const full = document.documentElement.clientWidth;
+  const availW = full - 32 - (wide && full >= 1000 ? 276 : 0);
+  const G = 6;
+  const side = S || ideaClamp(Math.floor(Math.min(availW, window.innerHeight * 0.62) / 3) - G, 96, 180);
+  const fs = ideaClamp(Math.round(side * 0.16), 16, 24);
+  const word = cellText(m, b * 9 + 4);
+  const nav = h('div', { class: 'nb-nav', 'aria-label': '3×3 の移動' },
+    Array.from({ length: 9 }, (_, j) => h('button', { type: 'button', class: 'nb-dot' + (j === b ? ' cur' : j === 4 ? ' mid' : ''),
+      dataset: { b: j }, 'aria-label': `ブロック ${j + 1} へ`, onclick: () => ideaGo(() => { ui.ideaBlock = j; }) })));
+  const cells = Array.from({ length: 9 }, (_, k) => {
+    const raw = b * 9 + k;
+    const i = canonIdx(raw);
+    const marked = !!materialAt(m, i);
+    return h('div', { class: 'nb-cell' },
+      ideaCell(m, raw, { big: true, editable: true, onclick: () => startEdit(m, raw) }),
+      k !== 4 && m.cells[i] && h('button', { type: 'button', class: 'nb-mark', 'aria-label': marked ? '印を外す' : '印を付ける',
+        'aria-pressed': marked ? 'true' : 'false', onmousedown: (e) => { if (ideaCur) e.preventDefault(); },
+        onclick: () => ideaToggleMark(m, raw) }, h('span', {}, marked ? '●' : '○')));
+  });
+  if (S) {   // 広い画面の書く画面：右の列（中央の言葉と大きな3×3）。戻る・移動は左の9×9と［‹ 並べる］が受け持つ
+    return h('div', { class: 'idea-block wide-right', style: `--ns:${side}px;--nfs:${fs}px;width:${3 * side + 2 * G}px` },
+      h('div', { class: 'nb-head' }, h('span', { class: 'nb-word' }, word || '（未記入）')),
+      h('div', { class: 'idea-slot' }, !ui.ideaEdit && h('span', { class: 'idea-slot-hint' }, 'マスを押して書く')),
+      h('div', { class: 'nb-grid' }, cells));
+  }
+  const back = wide
+    ? h('button', { type: 'button', class: 'ibtn nb-back idea-back', onclick: () => ideaGo(() => { ui.ideaOpen = null; ui.ideaBlock = null; }) }, '‹ 並べる')
+    : h('button', { type: 'button', class: 'ibtn nb-back', onclick: () => ideaGo(() => { ui.ideaBlock = null; }) }, `‹ ${mandalaName(m)}`);
+  return h('div', { class: 'idea-block', style: `--ns:${side}px;--nfs:${fs}px;width:${3 * side + 2 * G}px;max-width:100%` },
+    h('div', { class: 'nb-head' }, back, h('span', { class: 'nb-word' }, word || '（未記入）'), nav),
+    h('div', { class: 'nb-grid' }, cells));
+}
+
+// 一覧に戻ったあと、そのマンダラートが見える所へ動かす
+function ideaScrollToItem(id) {
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`.idea-item[data-id="${id}"]`);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const sh = document.querySelector('.stickyhead');
+    const topLimit = (sh ? sh.offsetHeight : 0) + 8;
+    if (r.top < topLimit || r.height > window.innerHeight - topLimit) window.scrollBy(0, r.top - topLimit);
+    else if (r.bottom > window.innerHeight) window.scrollBy(0, r.bottom - window.innerHeight + 8);
+  });
+}
+
+function renderIdeaWide() {
+  const full = document.documentElement.clientWidth;
+  const W = Math.max(300, full - 32);
+  const side = full >= 1000;
+  const avail = side ? W - 276 : W;
+  const open = ui.ideaOpen ? mandalaById(ui.ideaOpen) : null;
+  if (ui.ideaOpen && !open) { ui.ideaOpen = null; ui.ideaBlock = null; }
+  if (open) {
+    // 書く画面：左に9×9（ブロックを選ぶだけ）、右に選んだ3×3。縦向きでも横に並べる
+    const Wp = full - 32 - 24;
+    const c = ideaClamp(Math.floor((Wp * 0.45 - 36) / 9), 30, 52);
+    const s = Math.min(ideaClamp(Math.floor((Wp - (9 * c + 36) - 16) / 3), 96, 170), Math.max(96, Math.floor((window.innerHeight - 230) / 3)));
+    const b = ui.ideaBlock;
+    const head = h('div', { class: 'wl-head' },
+      h('button', { type: 'button', class: 'ibtn idea-back', onclick: () => { ideaGo(() => { ui.ideaOpen = null; ui.ideaBlock = null; }); ideaScrollToItem(open.id); } }, '‹ 並べる'),
+      h('span', { class: 'idea-name' }, mandalaName(open)),
+      h('button', { type: 'button', class: 'ibtn weak idea-del-wide', onclick: () => confirmDeleteMandala(open) }, 'このマンダラートを消す'));
+    const detail = h('div', { class: 'wl-detail' }, ideaBlockView(open, true, s), work.materials.length ? matTags() : null);
+    const nine = h('div', { class: 'wl-nine' },
+      mandalaEl(open, { c, tag: 'div', pad: true, sel: b, onBlock: (j) => { if (j !== ui.ideaBlock) ideaGo(() => { ui.ideaBlock = j; }); } }));
+    return h('div', { class: 'idea-wide-write' }, head, h('div', { class: 'wl-row' }, detail, nine));
+  }
+  let left;
+  if (!work.mandalas.length) {
+    left = h('div', { class: 'idea-empty' },
+      h('p', { class: 'note' }, 'マンダラートで言葉を広げて、気になる言葉に印を付けます。'),
+      h('button', { type: 'button', class: 'idea-add', onclick: addMandalaAndOpen }, '＋ マンダラート'));
+  } else {
+    const c = ideaClamp(Math.floor(((avail - 24) / 2 - 36) / 9), 30, 56);
+    left = h('div', { class: 'idea-tiles' },
+      h('div', { class: 'idea-top' },
+        h('span', { class: 'idea-hint' }, '書きたい所を押すと、その 3×3 が開く'),
+        h('button', { type: 'button', class: 'idea-add', onclick: addMandalaAndOpen }, '＋ マンダラート')),
+      h('div', { class: 'idea-grid' }, work.mandalas.map((m) => h('div', { class: 'idea-item', dataset: { id: m.id } },
+        h('div', { class: 'idea-head' },
+          h('span', { class: 'idea-name' }, mandalaName(m))),
+        mandalaEl(m, { c, tag: 'div', pad: true,
+          onBlock: (b) => { ui.ideaOpen = m.id; ui.ideaBlock = b; ui.ideaEdit = null; renderMain(); window.scrollTo(0, 0); } })))));
+  }
+  const showList = work.mandalas.length || work.materials.length;
+  return h('div', { class: 'idea-main' + (side ? '' : ' stack') },
+    h('div', { class: 'idea-left' }, left),
+    showList && matPanel());
+}
+
+function ideaSyncTabs() {
+  document.querySelectorAll('.idea-tab[data-id]').forEach((b) => b.classList.toggle('on', b.dataset.id === ui.ideaPick));
+}
+
+// スマホの全体：マンダラートを横に並べ、左右のスワイプで隣へ。選んでいる持ち主は ui.ideaPick だけ
+function ideaPager(c) {
+  const panes = work.mandalas.map((x) => h('div', { class: 'idea-pane', dataset: { id: x.id } },
+    mandalaEl(x, { c, tag: 'div', onBlock: (b) => { ui.ideaPick = x.id; ui.ideaBlock = b; ui.ideaEdit = null; renderMain(); window.scrollTo(0, 0); } }),
+    h('p', { class: 'idea-hint' }, '押した所の 3×3 に入る')));
+  const pager = h('div', { class: 'idea-pager' }, panes);
+  let timer = null;
+  const settle = () => {
+    clearTimeout(timer);
+    const w = pager.clientWidth;
+    if (!w || !work) return;
+    const idx = ideaClamp(Math.round(pager.scrollLeft / w), 0, work.mandalas.length - 1);
+    const x = work.mandalas[idx];
+    if (x && x.id !== ui.ideaPick) { ui.ideaPick = x.id; ideaSyncTabs(); }
+  };
+  pager.addEventListener('scroll', () => { clearTimeout(timer); timer = setTimeout(settle, 120); });
+  pager.addEventListener('scrollend', settle);
+  return pager;
+}
+
+// 描いたあと、選んでいる面の位置へ動きなしで合わせる
+function ideaPagerPlace() {
+  const p = document.querySelector('.idea-pager');
+  if (!p || !work) return;
+  const idx = Math.max(0, work.mandalas.findIndex((x) => x.id === ui.ideaPick));
+  p.scrollLeft = idx * p.clientWidth;
+}
+
+function renderIdeaNarrow() {
+  if (!work.mandalas.length) {
+    return h('div', { class: 'idea-empty' },
+      h('p', { class: 'note' }, 'マンダラートで言葉を広げて、気になる言葉に印を付けます。'),
+      h('button', { type: 'button', class: 'idea-add', onclick: addMandalaAndOpen }, '＋ マンダラート'),
+      work.materials.length ? matTags() : null);
+  }
+  let m = ui.ideaPick ? mandalaById(ui.ideaPick) : null;
+  if (!m) { m = work.mandalas[0]; ui.ideaPick = m.id; ui.ideaBlock = null; }
+  if (ui.ideaBlock == null) {
+    const full = document.documentElement.clientWidth;
+    const c = Math.floor((full - 32 - 24) / 9);
+    const pager = ideaPager(c);
+    return h('div', { class: 'idea-narrow' },
+      h('div', { class: 'idea-tabs' },
+        work.mandalas.map((x) => h('button', { type: 'button', class: 'idea-tab' + (x === m ? ' on' : ''), dataset: { id: x.id },
+          onclick: () => {
+            ui.ideaPick = x.id;
+            ideaSyncTabs();
+            const idx = work.mandalas.indexOf(x);
+            pager.scrollTo({ left: idx * pager.clientWidth, behavior: 'smooth' });
+          } }, mandalaName(x))),
+        h('button', { type: 'button', class: 'idea-tab add', 'aria-label': 'マンダラートを足す', onclick: addMandalaAndOpen }, '＋')),
+      pager,
+      matTags(),
+      h('button', { type: 'button', class: 'ibtn weak idea-del', onclick: () => {
+        const cur = ui.ideaPick ? mandalaById(ui.ideaPick) : null;
+        if (cur) confirmDeleteMandala(cur);
+      } }, 'このマンダラートを消す'));
+  }
+  return h('div', { class: 'idea-narrow' },
+    ideaBlockView(m, false),
+    h('p', { class: 'idea-hint' }, '右上の ○ で印'),
+    matTags());
+}
+
+// ----- 小さな面（確認・拾った言葉） -----
+
+function ideaOverlay(sheet, onClose) {
+  const o = h('div', { class: 'overlay bottom', onclick: (e) => { if (e.target === o) onClose(); } }, sheet);
+  return o;
+}
+
+// 拾った言葉などの面を閉じる。カードの詳細から開いていたら、詳細に戻る
+function ideaShut() {
+  if (ui.openCardId) renderCardSheet();
+  else modalRoot.replaceChildren();
+}
+
+function ideaConfirm(title, note, goLabel, onGo, onCancel) {
+  ideaStopEdit();
+  const sheet = h('div', { class: 'sheet small-sheet idea-confirm', role: 'dialog', 'aria-label': title },
+    h('h2', {}, title),
+    note && h('p', { class: 'note' }, note),
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'primary idea-go', onclick: onGo }, goLabel),
+      h('button', { type: 'button', class: 'ibtn idea-cancel', onclick: onCancel }, 'やめる')));
+  modalRoot.replaceChildren(ideaOverlay(sheet, onCancel));
+}
+
+function addFreeMaterial() {
+  const t = { id: uid(), text: '', src: null, cards: [], core: false };
+  work.materials.push(t);
+  renderMaterialSheet(t.id, false);
+  const inp = modalRoot.querySelector('.mat-input');
+  if (inp) inp.focus();
+}
+
+function openMaterial(id) { renderMaterialSheet(id, false); }
+
+function closeMaterial(id) {
+  const t = materialById(id);
+  if (t && !t.src && !t.text.trim() && !hasTies(t)) {
+    work.materials = work.materials.filter((x) => x !== t);
+    changed();
+  }
+  ideaShut();
+}
+
+function cardChipText(id, num) {
+  const x = findCard(id);
+  return `#${num.get(id) || '保留'} ${x ? cardLabel(x.card) : ''}`.trim();
+}
+
+// この言葉で、保留の末尾にカードを作って結ぶ
+function materialToCard(t) {
+  const text = t.text.trim();
+  if (!text) { showToast('言葉を書いてからカードにします'); return false; }
+  const c = newCard();
+  c.title = text;
+  work.pool.push(c);
+  t.cards.push(c.id);
+  changed();
+  showToast('保留にカードを作りました');
+  return true;
+}
+
+function renderMaterialSheet(id, picking) {
+  ideaStopEdit();
+  const t = materialById(id);
+  if (!t) { ideaShut(); return; }
+  const num = numbering();
+  const m = t.src ? mandalaById(t.src.m) : null;
+  const redo = (p) => renderMaterialSheet(id, p);
+  const word = t.src
+    ? h('div', { class: 'field' }, h('span', {}, '言葉'), h('div', { class: 'mat-word' }, t.text),
+        h('small', {}, `出どころ：${m ? mandalaName(m) : ''}（言葉の直しはマスで）`))
+    : h('label', { class: 'field' }, h('span', {}, '言葉'),
+        h('input', { type: 'text', class: 'mat-input', value: t.text, placeholder: '拾った言葉',
+          oninput: (e) => { t.text = e.target.value; changed(true); } }));
+  const linked = t.cards.filter((cid) => findCard(cid));
+  const free = [];
+  for (const x of allCards()) if (!t.cards.includes(x.card.id)) free.push(x.card);
+  for (const c of work.pool) if (!t.cards.includes(c.id)) free.push(c);
+  const ties = h('div', { class: 'field' }, h('span', {}, '結び'),
+    h('div', { class: 'mat-tags' },
+      h('button', { type: 'button', class: 'mat-chip core-chip' + (t.core ? ' on' : ''), 'aria-pressed': t.core ? 'true' : 'false',
+        onclick: () => { t.core = !t.core; changed(); redo(picking); } }, '芯'),
+      linked.map((cid) => h('button', { type: 'button', class: 'mat-chip card-chip on', dataset: { id: cid }, title: '押すと外す',
+        onclick: () => { t.cards = t.cards.filter((x) => x !== cid); changed(); redo(picking); } }, cardChipText(cid, num))),
+      free.length > 0 && h('button', { type: 'button', class: 'mat-chip add card-add', onclick: () => redo(!picking) }, '＋ カードに結ぶ')),
+    picking && h('div', { class: 'mat-pick' }, free.map((c) => h('button', { type: 'button', class: 'mat-pick-item', dataset: { id: c.id },
+      onclick: () => { t.cards.push(c.id); changed(); redo(false); } }, cardChipText(c.id, num)))));
+  const sheet = h('div', { class: 'sheet small-sheet mat-sheet', role: 'dialog', 'aria-label': '拾った言葉' },
+    h('h2', {}, '拾った言葉'),
+    h('div', { class: 'actions mat-top' },
+      h('button', { type: 'button', class: 'primary mat-tocard', onclick: () => { if (materialToCard(t)) redo(picking); } }, 'カードにする')),
+    word,
+    ties,
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'ibtn mat-remove', onclick: () => {
+        if (!hasTies(t)) { dropMaterial(t); ideaShut(); return; }
+        ideaConfirm('拾った言葉から外しますか？', `「${t.text}」は${tieParts(t).join('・')}に結ばれています。外すと拾った言葉から消え、結びも切れます。`,
+          '外す', () => { dropMaterial(t); ideaShut(); }, () => redo(false));
+      } }, '拾った言葉から外す'),
+      h('button', { type: 'button', class: 'ibtn mat-close', onclick: () => closeMaterial(id) }, '閉じる')));
+  modalRoot.replaceChildren(ideaOverlay(sheet, () => closeMaterial(id)));
+}
+
+// カードの詳細：結んだ拾った言葉の札と、［＋ 拾った言葉］
+function cardMatField(c) {
+  const linked = work.materials.filter((t) => t.cards.includes(c.id));
+  const rest = work.materials.filter((t) => !t.cards.includes(c.id));
+  if (!linked.length && !rest.length) return null;
+  let list = null;
+  list = rest.length ? h('div', { class: 'mat-pick', hidden: true }, rest.map((t) => h('button', { type: 'button', class: 'mat-pick-item', dataset: { id: t.id },
+    onclick: () => { t.cards.push(c.id); changed(); renderCardSheet(); } }, t.text || '（空）'))) : null;
+  return h('div', { class: 'field card-mats', dataset: { field: 'materials' } },
+    h('span', {}, '拾った言葉'),
+    h('div', { class: 'mat-tags' },
+      linked.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id }, onclick: () => openMaterial(t.id) }, t.text || '（空）')),
+      rest.length > 0 && h('button', { type: 'button', class: 'mat-tag add mat-add-card', onclick: () => { list.hidden = !list.hidden; } }, '＋ 拾った言葉')),
+    list);
+}
+
+let ideaResizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(ideaResizeTimer);
+  ideaResizeTimer = setTimeout(() => {
+    if (!work || ui.tab !== 'idea' || modalRoot.firstChild) return;
+    if (!ui.ideaEdit) { renderMain(); return; }
+    // 書いている途中：広い↔狭いが変わったら、確定して閉じて描き直す。同じなら入力欄の位置だけ付け直す
+    if (ideaBar && ideaBar.el.classList.contains('wide') === !narrowMq.matches) { renderMain(); return; }
+    const ch = ideaEndEdit();
+    if (ch) changed(); else renderMain();
+  }, 150);
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => { if (narrowMq.matches) placeIdeaBar(); ideaEnsureVisible(); });
+  window.visualViewport.addEventListener('scroll', () => { if (narrowMq.matches) placeIdeaBar(); });
+}
 // ---------- カードの詳細 ----------
 
 function openCard(id) {
@@ -1841,6 +3219,7 @@ function renderCardSheet() {
     text('conflict', '対立', '誰が何を求め、誰が邪魔するか', true),
     text('event', '何が起きるか', 'その瞬間に起きること', true),
     text('change', '変化', '全員の欲求がどう変わるか', true),
+    cardMatField(c),
     more);
 
   const wasOpen = modalRoot.firstChild;
@@ -1942,6 +3321,7 @@ function showGaps() {
   document.querySelectorAll('#cols .track').forEach((track) => {
     const bid = track.dataset.block;
     let idx = 0, emitted = false, bottom = null;
+    const total = track.querySelectorAll(':scope > .card').length;
     const add = (index, y) => track.append(h('button', {
       type: 'button', class: 'drop-gap', dataset: { block: bid, index: String(index) },
       'aria-label': 'ここに置く', tabindex: '-1', style: `top:${y - 14}px`,
@@ -1950,7 +3330,11 @@ function showGaps() {
     for (const ch of Array.from(track.children)) {
       const isCard = ch.classList.contains('card');
       if (!isCard && !ch.classList.contains('break')) continue;
-      if (!emitted) { add(idx, ch.offsetTop - 3); emitted = true; }
+      if (!emitted) {
+        // 末尾の休憩は空き枠のあとに出るので、置き場所は最後のカードの直後に出す
+        add(idx, !isCard && idx === total && bottom != null ? bottom + 3 : ch.offsetTop - 3);
+        emitted = true;
+      }
       if (isCard) { idx++; emitted = false; }
       bottom = ch.offsetTop + ch.offsetHeight;
     }
@@ -2025,7 +3409,7 @@ function undoMove() {
 
 // ---------- 置いた場所が分かる動き ----------
 
-const LANDED_MS = 1600;
+const LANDED_MS = 1000;
 let landedTimer = null;
 
 function landedElapsed(kind, id) {
@@ -2273,15 +3657,21 @@ window.addEventListener('resize', () => { if (ui.lifted) syncLift(); });
 
 // ---------- 起動 ----------
 
-window.addEventListener('pagehide', () => saveNow());
+window.addEventListener('pagehide', () => { saveNow(); cloudFlushAll(); });
 window.addEventListener('beforeunload', (e) => {
   // 書き出していない作品を開いたまま閉じようとしたときの確認（主にパソコンのブラウザ）
-  if (work && isUnexported(work)) {
+  if (work && exportUrgent(work)) {
     e.preventDefault();
     e.returnValue = '';
   }
 });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveNow(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { saveNow(); cloudFlushAll(); cloudPollStop(); } else cloudResume();
+});
+window.addEventListener('pageshow', cloudResume);
+window.addEventListener('focus', cloudResume);
+// 入力が終わったら、待たせていた他の端末の変更を取り込む
+document.addEventListener('focusout', () => { if (cloud.pending.size || ui.renderPending) syncKick(250); });
 narrowMq.addEventListener('change', () => renderMain());
 
 ui.storageOk = storageAvailable();
@@ -2294,3 +3684,4 @@ try {
   else if (lastId) localStorage.removeItem(LAST_KEY);
 } catch (e) { /* 一覧のまま */ }
 if (!work) renderMain();
+cloudInit(); // claude.ai の中なら、つながってからデータベースと合わせる（起動は待たせない）
