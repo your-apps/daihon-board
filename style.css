@@ -582,7 +582,6 @@ button.mblock-btn { padding: 0; min-height: 0; border: none; background: none; b
 .mat-chip.add { border-style: dashed; color: var(--ink); }
 .mat-word { font-weight: 700; font-size: 17px; }
 .mat-sheet .actions { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
-.mat-sheet .actions.mat-top { margin-bottom: 8px; }
 .mat-input { font-size: 16px; min-height: 44px; }
 
 /* スマホの全体：マンダラートを横に並べ、左右のスワイプで隣へ */
@@ -622,27 +621,24 @@ button.mblock-btn { padding: 0; min-height: 0; border: none; background: none; b
 }
 #idea-bar.on { transform: none; pointer-events: auto; }
 #idea-bar.kb { padding-bottom: 8px; }
-.ibar-label { flex: 0 1 auto; max-width: 5.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .ibar-input { flex: 1 1 auto; min-width: 0; height: 44px; padding: 0 12px; font-size: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
 .ibar-input:focus { outline: none; border-color: var(--ink); }
 #idea-bar button { flex: none; min-height: 44px; padding: 6px 14px; font-size: 16px; }
 body.idea-editing #app { padding-bottom: var(--ibar-pad, 0px); }
 
 /* 広い画面の書く画面：上の行（並べる・名前・消す）、その下の左に詳細の列、右に9×9（縦向きでも横に並べる） */
-.idea-wide-write { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.idea-wide-write { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0 auto; max-width: 100%; }
 .wl-head { display: flex; align-items: center; gap: 12px; }
 .wl-head .idea-name { flex: 1 1 auto; }
-.wl-head .idea-del-wide { flex: none; margin-left: auto; color: var(--muted); min-height: 44px; }
+.wl-head .idea-del-wide { flex: none; margin-left: auto; }
 .wl-row { display: flex; flex-wrap: nowrap; align-items: flex-start; justify-content: flex-start; gap: 16px; }
 .wl-detail { flex: none; display: grid; gap: 12px; align-content: start; }
 .wl-nine { flex: none; }
-.wl-detail .nb-word { text-align: left; }
 .wl-detail .mat-tags { margin-top: 0; }
 .idea-slot { height: 44px; display: flex; align-items: center; }
 .idea-slot-hint { color: var(--muted); font-size: 14px; }
 #idea-bar.wide { position: absolute; right: auto; padding: 0; background: var(--bg); border-top: none; transform: none; z-index: 5; }
 #idea-bar.wide:not(.on) { visibility: hidden; }
-#idea-bar.wide .ibar-label { display: none; }
 .mandala.pad { gap: 0; }
 .mandala.pad .mblock { padding: 4px; border-radius: 6px; }
 .mblock.sel { outline: 3px solid var(--ink); outline-offset: -1px; background: var(--paper); }
@@ -651,3 +647,10 @@ body.idea-editing #app { padding-bottom: var(--ibar-pad, 0px); }
 .export-bar.calm { background: transparent; color: var(--muted); padding-left: 0; }
 .export-bar.calm .export-msg { font-weight: 400; color: var(--muted); font-size: 13px; }
 .export-bar.calm .export-btn { min-height: 24px; background: var(--paper); color: var(--ink); border: 1px solid var(--line); font-size: 13px; }
+
+/* 消し始める操作：薄い字だけ。確かめる画面の［消す］［外す］は朱 */
+button.idea-del, button.idea-del-wide, button.mat-remove { background: none; border: none; box-shadow: none; padding: 2px 6px; min-height: 24px; width: auto; color: var(--muted); font-size: 13px; }
+button.idea-del { justify-self: center; align-self: center; margin: 0 auto; display: block; }
+button.idea-go.danger { background: var(--alert); border-color: var(--alert); color: var(--paper); }
+.mat-tags .mat-head { flex: 0 0 100%; width: 100%; }
+button.mat-remove { align-self: center; }

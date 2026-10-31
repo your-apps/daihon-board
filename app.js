@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-31c';
+const APP_BUILD = '2026-10-31e';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -2192,7 +2192,6 @@ function renderCore() {
     h('span', { class: 'core-lab' }, label), area(key, hint, label));
   const theme = h('div', { class: 'core-theme', dataset: { field: 'theme' } },
     h('span', { class: 'core-lab' }, 'テーマ'), area('theme', 'テーマを一言', 'テーマ'));
-  const coreMats = work.materials.filter((t) => t.core);
   return h('div', { class: 'page core' },
     h('div', { class: 'core-paper' },
       theme,
@@ -2202,10 +2201,7 @@ function renderCore() {
         half('obstacle', '阻むもの', '求めるものを阻むもの')),
       line('event', '決定的な出来事', '決定的な出来事'),
       h('div', { class: 'core-arrow', 'aria-hidden': 'true' }, '↓'),
-      line('change', '最後の変化', '最後の変化')),
-    coreMats.length > 0 && h('div', { class: 'core-mats' }, h('span', { class: 'core-lab' }, '拾った言葉'),
-      h('div', { class: 'mat-tags' }, coreMats.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id },
-        onclick: () => openMaterial(t.id) }, t.text || '（空）')))));
+      line('change', '最後の変化', '最後の変化')));
 }
 
 // ---------- 画面：発想（マンダラートと拾った言葉） ----------
@@ -2226,16 +2222,6 @@ function materialAt(m, i) {
   return work.materials.find((t) => t.src && t.src.m === m.id && t.src.i === c) || null;
 }
 function hasTies(t) { return t.core || t.cards.length > 0; }
-
-// 結び先の言い方（「カード 3, 7」「芯」）
-function tieParts(t) {
-  const num = numbering();
-  const parts = [];
-  const nos = t.cards.filter((id) => findCard(id)).map((id) => num.get(id) || 0).sort((a, b) => (a || 1e9) - (b || 1e9));
-  if (nos.length) parts.push('カード ' + nos.map((n) => n || '保留').join(', '));
-  if (t.core) parts.push('芯');
-  return parts;
-}
 
 function ideaClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -2291,7 +2277,7 @@ function commitCell(m, raw, value) {
   return true;
 }
 
-// 印を付ける・外す（結びがあるときは、外す前に確かめる）
+// 印を付ける・外す
 function toggleMark(m, raw) {
   const i = canonIdx(raw);
   if (i === 40 || !m.cells[i]) return;
@@ -2299,11 +2285,6 @@ function toggleMark(m, raw) {
   if (!t) {
     work.materials.push({ id: uid(), text: m.cells[i], src: { m: m.id, i }, cards: [], core: false });
     changed();
-    return;
-  }
-  if (hasTies(t)) {
-    ideaConfirm('印を外しますか？', `「${t.text}」は${tieParts(t).join('・')}に結ばれています。外すと拾った言葉から消え、結びも切れます。`,
-      '外す', () => { dropMaterial(t); ideaShut(); }, ideaShut);
     return;
   }
   dropMaterial(t);
@@ -2328,7 +2309,6 @@ let ideaCur = null;
 
 function ensureIdeaBar() {
   if (ideaBar) return ideaBar;
-  const label = h('span', { class: 'ibar-label' });
   const input = h('input', { type: 'text', class: 'ibar-input', 'aria-label': 'マスの言葉', enterkeyhint: 'next',
     autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
     oninput: ideaLiveText,
@@ -2351,10 +2331,10 @@ function ensureIdeaBar() {
     const ch = ideaEndEdit();
     if (ch) changed(); else renderMain();
   } }, '完了');
-  const el = h('div', { id: 'idea-bar', role: 'group', 'aria-label': 'マスの言葉を書く' }, label, input, next, done);
+  const el = h('div', { id: 'idea-bar', role: 'group', 'aria-label': 'マスの言葉を書く' }, input, next, done);
   el.inert = true;
   document.body.append(el);
-  ideaBar = { el, input, label };
+  ideaBar = { el, input };
   return ideaBar;
 }
 
@@ -2494,8 +2474,6 @@ function syncIdeaBar() {
     bar.input.value = cellText(want.m, want.raw);
     ideaCur = { work, m: want.m, raw: want.raw, key };
   }
-  const b = Math.floor(want.raw / 9);
-  bar.label.textContent = (b === 4 ? '中心' : (cellText(want.m, b * 9 + 4) || '（未記入）')) + ' ›';
   bar.el.inert = false;
   bar.el.classList.add('on');
   document.body.classList.add('idea-editing');
@@ -2527,13 +2505,6 @@ function ideaNext() {
 function ideaToggleMark(m, raw) {
   const ch = ideaCommit(true);
   const t = materialAt(m, raw);
-  if (t && hasTies(t)) {                   // 確かめの面が出る。先に入力を閉じる
-    ideaEndEdit();
-    if (ch) changed(true);
-    renderMain();
-    toggleMark(m, raw);
-    return;
-  }
   if (ch) changed(true);
   toggleMark(m, raw);
 }
@@ -2581,7 +2552,7 @@ function matPanel() {
     h('p', { class: 'mat-sub' }, '印を付けた言葉。カードにできる'),
     list.map((t) => {
       const m = t.src ? mandalaById(t.src.m) : null;
-      const sub = [m && mandalaName(m)].concat(tieParts(t)).filter(Boolean).join('・');
+      const sub = m ? mandalaName(m) : '';
       return h('button', { type: 'button', class: 'mat-item', dataset: { id: t.id }, onclick: () => openMaterial(t.id) },
         h('strong', {}, t.text || '（空）'), sub && h('small', {}, sub));
     }),
@@ -2590,6 +2561,7 @@ function matPanel() {
 
 function matTags() {
   return h('div', { class: 'mat-tags idea-mats' },
+    h('div', { class: 'mat-head' }, h('strong', {}, '拾った言葉'), h('span', { class: 'mat-count' }, `${work.materials.length}件`)),
     work.materials.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id }, onclick: () => openMaterial(t.id) }, t.text || '（空）')),
     h('button', { type: 'button', class: 'mat-tag add mat-new', 'aria-label': '書いて拾った言葉を足す', onclick: addFreeMaterial }, '＋'));
 }
@@ -2632,7 +2604,6 @@ function ideaBlockView(m, wide, S) {
   });
   if (S) {   // 広い画面の書く画面：右の列（中央の言葉と大きな3×3）。戻る・移動は左の9×9と［‹ 並べる］が受け持つ
     return h('div', { class: 'idea-block wide-right', style: `--ns:${side}px;--nfs:${fs}px;width:${3 * side + 2 * G}px` },
-      h('div', { class: 'nb-head' }, h('span', { class: 'nb-word' }, word || '（未記入）')),
       h('div', { class: 'idea-slot' }, !ui.ideaEdit && h('span', { class: 'idea-slot-hint' }, 'マスを押して書く')),
       h('div', { class: 'nb-grid' }, cells));
   }
@@ -2673,17 +2644,18 @@ function renderIdeaWide() {
     const head = h('div', { class: 'wl-head' },
       h('button', { type: 'button', class: 'ibtn idea-back', onclick: () => { ideaGo(() => { ui.ideaOpen = null; ui.ideaBlock = null; }); ideaScrollToItem(open.id); } }, '‹ 並べる'),
       h('span', { class: 'idea-name' }, mandalaName(open)),
-      h('button', { type: 'button', class: 'ibtn weak idea-del-wide', onclick: () => confirmDeleteMandala(open) }, 'このマンダラートを消す'));
+      h('button', { type: 'button', class: 'idea-del-wide', onclick: () => confirmDeleteMandala(open) }, 'このマンダラートを消す'));
     const detail = h('div', { class: 'wl-detail' }, ideaBlockView(open, true, s), work.materials.length ? matTags() : null);
     const nine = h('div', { class: 'wl-nine' },
       mandalaEl(open, { c, tag: 'div', pad: true, sel: b, onBlock: (j) => { if (j !== ui.ideaBlock) ideaGo(() => { ui.ideaBlock = j; }); } }));
+    requestAnimationFrame(ideaFitWrite);
     return h('div', { class: 'idea-wide-write' }, head, h('div', { class: 'wl-row' }, detail, nine));
   }
   let left;
   if (!work.mandalas.length) {
     left = h('div', { class: 'idea-empty' },
       h('p', { class: 'note' }, 'マンダラートで言葉を広げて、気になる言葉に印を付けます。'),
-      h('button', { type: 'button', class: 'idea-add', onclick: addMandalaAndOpen }, '＋ マンダラート'));
+      h('button', { type: 'button', class: 'idea-add primary', onclick: addMandalaAndOpen }, '＋ マンダラート'));
   } else {
     const c = ideaClamp(Math.floor(((avail - 24) / 2 - 36) / 9), 30, 56);
     left = h('div', { class: 'idea-tiles' },
@@ -2696,10 +2668,60 @@ function renderIdeaWide() {
         mandalaEl(m, { c, tag: 'div', pad: true,
           onBlock: (b) => { ui.ideaOpen = m.id; ui.ideaBlock = b; ui.ideaEdit = null; renderMain(); window.scrollTo(0, 0); } })))));
   }
-  const showList = work.mandalas.length || work.materials.length;
+  const showList = !!(work.mandalas.length || work.materials.length);
+  if (work.mandalas.length === 1) requestAnimationFrame(ideaFitOne);
   return h('div', { class: 'idea-main' + (side ? '' : ' stack') },
     h('div', { class: 'idea-left' }, left),
     showList && matPanel());
+}
+
+// 書く画面：ページ全体が画面の高さに収まる範囲で、9×9 を先に、3×3 を残りいっぱいに大きくし、2つまとめて中央に置く
+function ideaFitWrite() {
+  const wrap = document.querySelector('.idea-wide-write');
+  if (!wrap || narrowMq.matches || !ui.ideaOpen) return;
+  const nine = wrap.querySelector('.mandala'), blk = wrap.querySelector('.idea-block'), detail = wrap.querySelector('.wl-detail');
+  if (!nine || !blk || !detail) return;
+  const root = document.documentElement;
+  const oldPad = root.style.getPropertyValue('--ibar-pad');
+  root.style.setProperty('--ibar-pad', '0px');         // 書いている間の下の余白は、収まりの計算に入れない
+  const W = root.clientWidth - 32, GAP = 16, G = 6, NS_MIN = 100;
+  const setNine = (mc) => { nine.style.setProperty('--mc', mc + 'px'); nine.style.setProperty('--mfs', ideaClamp(Math.round(mc * 0.27), 10, 18) + 'px'); };
+  const setBlk = (ns) => {
+    blk.style.setProperty('--ns', ns + 'px'); blk.style.setProperty('--nfs', ideaClamp(Math.round(ns * 0.16), 16, 24) + 'px');
+    blk.style.width = (3 * ns + 2 * G) + 'px';
+    detail.style.width = blk.style.width;        // 拾った言葉の札も、3×3 の幅の中で折り返す
+  };
+  const fits = () => root.scrollHeight <= window.innerHeight;
+  // 1. 9×9：3×3 を隠して、高さに収まる最大（幅は3×3の最小を残す）
+  detail.style.display = 'none';
+  let mc = ideaClamp(Math.floor((W - GAP - (3 * NS_MIN + 2 * G) - 36) / 9), 30, 80);
+  setNine(mc);
+  while (mc > 30 && !fits()) { mc--; setNine(mc); }
+  // 2. 3×3：幅の残りと高さに収まる最大
+  detail.style.display = '';
+  let ns = ideaClamp(Math.floor((W - GAP - nine.offsetWidth - 2 * G) / 3), 60, 200);
+  setBlk(ns);
+  while (ns > 60 && !fits()) { ns -= 2; setBlk(ns); }
+  wrap.style.width = (nine.offsetWidth + GAP + blk.offsetWidth) + 'px';
+  if (oldPad) root.style.setProperty('--ibar-pad', oldPad); else root.style.removeProperty('--ibar-pad');
+  placeIdeaBar();
+}
+
+// 1枚だけのとき：9×9 が幅と画面の高さの両方に収まる大きさに合わせる
+function ideaFitOne() {
+  const el = document.querySelector('.idea-grid .mandala');
+  if (!el || narrowMq.matches || ui.ideaOpen) return;
+  const c0 = parseFloat(el.style.getPropertyValue('--mc')) || 30;
+  const r = el.getBoundingClientRect();
+  const extra = r.height - 9 * c0;
+  const extraW = r.width - 9 * c0;
+  const full = document.documentElement.clientWidth;
+  const availW = full - 32 - (full >= 1000 ? 276 + 16 : 0);
+  const top = r.top + window.scrollY;
+  const c = ideaClamp(Math.floor(Math.min((availW - extraW) / 9, (window.innerHeight - top - 48 - extra) / 9)), 30, 72);
+  if (c === c0) return;
+  el.style.setProperty('--mc', c + 'px');
+  el.style.setProperty('--mfs', ideaClamp(Math.round(c * 0.27), 10, 18) + 'px');
 }
 
 function ideaSyncTabs() {
@@ -2738,7 +2760,7 @@ function renderIdeaNarrow() {
   if (!work.mandalas.length) {
     return h('div', { class: 'idea-empty' },
       h('p', { class: 'note' }, 'マンダラートで言葉を広げて、気になる言葉に印を付けます。'),
-      h('button', { type: 'button', class: 'idea-add', onclick: addMandalaAndOpen }, '＋ マンダラート'),
+      h('button', { type: 'button', class: 'idea-add primary', onclick: addMandalaAndOpen }, '＋ マンダラート'),
       work.materials.length ? matTags() : null);
   }
   let m = ui.ideaPick ? mandalaById(ui.ideaPick) : null;
@@ -2759,7 +2781,7 @@ function renderIdeaNarrow() {
         h('button', { type: 'button', class: 'idea-tab add', 'aria-label': 'マンダラートを足す', onclick: addMandalaAndOpen }, '＋')),
       pager,
       matTags(),
-      h('button', { type: 'button', class: 'ibtn weak idea-del', onclick: () => {
+      h('button', { type: 'button', class: 'idea-del', onclick: () => {
         const cur = ui.ideaPick ? mandalaById(ui.ideaPick) : null;
         if (cur) confirmDeleteMandala(cur);
       } }, 'このマンダラートを消す'));
@@ -2789,7 +2811,7 @@ function ideaConfirm(title, note, goLabel, onGo, onCancel) {
     h('h2', {}, title),
     note && h('p', { class: 'note' }, note),
     h('div', { class: 'actions' },
-      h('button', { type: 'button', class: 'primary idea-go', onclick: onGo }, goLabel),
+      h('button', { type: 'button', class: 'primary idea-go' + (goLabel === '消す' || goLabel === '外す' ? ' danger' : ''), onclick: onGo }, goLabel),
       h('button', { type: 'button', class: 'ibtn idea-cancel', onclick: onCancel }, 'やめる')));
   modalRoot.replaceChildren(ideaOverlay(sheet, onCancel));
 }
@@ -2797,12 +2819,12 @@ function ideaConfirm(title, note, goLabel, onGo, onCancel) {
 function addFreeMaterial() {
   const t = { id: uid(), text: '', src: null, cards: [], core: false };
   work.materials.push(t);
-  renderMaterialSheet(t.id, false);
+  renderMaterialSheet(t.id);
   const inp = modalRoot.querySelector('.mat-input');
   if (inp) inp.focus();
 }
 
-function openMaterial(id) { renderMaterialSheet(id, false); }
+function openMaterial(id) { renderMaterialSheet(id); }
 
 function closeMaterial(id) {
   const t = materialById(id);
@@ -2813,80 +2835,26 @@ function closeMaterial(id) {
   ideaShut();
 }
 
-function cardChipText(id, num) {
-  const x = findCard(id);
-  return `#${num.get(id) || '保留'} ${x ? cardLabel(x.card) : ''}`.trim();
-}
-
-// この言葉で、保留の末尾にカードを作って結ぶ
-function materialToCard(t) {
-  const text = t.text.trim();
-  if (!text) { showToast('言葉を書いてからカードにします'); return false; }
-  const c = newCard();
-  c.title = text;
-  work.pool.push(c);
-  t.cards.push(c.id);
-  changed();
-  showToast('保留にカードを作りました');
-  return true;
-}
-
-function renderMaterialSheet(id, picking) {
+function renderMaterialSheet(id) {
   ideaStopEdit();
   const t = materialById(id);
   if (!t) { ideaShut(); return; }
-  const num = numbering();
   const m = t.src ? mandalaById(t.src.m) : null;
-  const redo = (p) => renderMaterialSheet(id, p);
   const word = t.src
     ? h('div', { class: 'field' }, h('span', {}, '言葉'), h('div', { class: 'mat-word' }, t.text),
         h('small', {}, `出どころ：${m ? mandalaName(m) : ''}（言葉の直しはマスで）`))
     : h('label', { class: 'field' }, h('span', {}, '言葉'),
         h('input', { type: 'text', class: 'mat-input', value: t.text, placeholder: '拾った言葉',
           oninput: (e) => { t.text = e.target.value; changed(true); } }));
-  const linked = t.cards.filter((cid) => findCard(cid));
-  const free = [];
-  for (const x of allCards()) if (!t.cards.includes(x.card.id)) free.push(x.card);
-  for (const c of work.pool) if (!t.cards.includes(c.id)) free.push(c);
-  const ties = h('div', { class: 'field' }, h('span', {}, '結び'),
-    h('div', { class: 'mat-tags' },
-      h('button', { type: 'button', class: 'mat-chip core-chip' + (t.core ? ' on' : ''), 'aria-pressed': t.core ? 'true' : 'false',
-        onclick: () => { t.core = !t.core; changed(); redo(picking); } }, '芯'),
-      linked.map((cid) => h('button', { type: 'button', class: 'mat-chip card-chip on', dataset: { id: cid }, title: '押すと外す',
-        onclick: () => { t.cards = t.cards.filter((x) => x !== cid); changed(); redo(picking); } }, cardChipText(cid, num))),
-      free.length > 0 && h('button', { type: 'button', class: 'mat-chip add card-add', onclick: () => redo(!picking) }, '＋ カードに結ぶ')),
-    picking && h('div', { class: 'mat-pick' }, free.map((c) => h('button', { type: 'button', class: 'mat-pick-item', dataset: { id: c.id },
-      onclick: () => { t.cards.push(c.id); changed(); redo(false); } }, cardChipText(c.id, num)))));
   const sheet = h('div', { class: 'sheet small-sheet mat-sheet', role: 'dialog', 'aria-label': '拾った言葉' },
     h('h2', {}, '拾った言葉'),
-    h('div', { class: 'actions mat-top' },
-      h('button', { type: 'button', class: 'primary mat-tocard', onclick: () => { if (materialToCard(t)) redo(picking); } }, 'カードにする')),
     word,
-    ties,
     h('div', { class: 'actions' },
-      h('button', { type: 'button', class: 'ibtn mat-remove', onclick: () => {
-        if (!hasTies(t)) { dropMaterial(t); ideaShut(); return; }
-        ideaConfirm('拾った言葉から外しますか？', `「${t.text}」は${tieParts(t).join('・')}に結ばれています。外すと拾った言葉から消え、結びも切れます。`,
-          '外す', () => { dropMaterial(t); ideaShut(); }, () => redo(false));
+      h('button', { type: 'button', class: 'mat-remove', onclick: () => {
+        dropMaterial(t); ideaShut();
       } }, '拾った言葉から外す'),
       h('button', { type: 'button', class: 'ibtn mat-close', onclick: () => closeMaterial(id) }, '閉じる')));
   modalRoot.replaceChildren(ideaOverlay(sheet, () => closeMaterial(id)));
-}
-
-// カードの詳細：結んだ拾った言葉の札と、［＋ 拾った言葉］
-function cardMatField(c) {
-  const linked = work.materials.filter((t) => t.cards.includes(c.id));
-  const rest = work.materials.filter((t) => !t.cards.includes(c.id));
-  if (!linked.length && !rest.length) return null;
-  let list = null;
-  list = rest.length ? h('div', { class: 'mat-pick', hidden: true }, rest.map((t) => h('button', { type: 'button', class: 'mat-pick-item', dataset: { id: t.id },
-    onclick: () => { t.cards.push(c.id); changed(); renderCardSheet(); } }, t.text || '（空）'))) : null;
-  return h('div', { class: 'field card-mats', dataset: { field: 'materials' } },
-    h('span', {}, '拾った言葉'),
-    h('div', { class: 'mat-tags' },
-      linked.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id }, onclick: () => openMaterial(t.id) }, t.text || '（空）')),
-      rest.length > 0 && h('button', { type: 'button', class: 'mat-tag add mat-add-card', onclick: () => { list.hidden = !list.hidden; } }, '＋ 拾った言葉')),
-    list);
 }
 
 let ideaResizeTimer = null;
@@ -3219,7 +3187,6 @@ function renderCardSheet() {
     text('conflict', '対立', '誰が何を求め、誰が邪魔するか', true),
     text('event', '何が起きるか', 'その瞬間に起きること', true),
     text('change', '変化', '全員の欲求がどう変わるか', true),
-    cardMatField(c),
     more);
 
   const wasOpen = modalRoot.firstChild;
