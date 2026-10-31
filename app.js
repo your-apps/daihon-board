@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-31g';
+const APP_BUILD = '2026-10-31h';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -150,13 +150,14 @@ function newWork(title, type) {
     showBeats: true, // 型の札（ビート）を表示するか
     mandalas: [],    // マンダラート { id, cells: 81個の文字 }
     materials: [],   // 素材 { id, text, src, cards, core }
+    memos: [],       // 単語のメモ { id, text }（拾った言葉とは別）
   };
 }
 
 // 作品の芯：作品全体の 対立 → 出来事 → 変化
-const CORE_KEYS = ['protagonist', 'want', 'obstacle', 'event', 'change', 'theme'];
+const CORE_KEYS = ['protagonist', 'want', 'obstacle', 'event', 'change', 'theme', 'direction'];
 function newCore() {
-  return { protagonist: '', want: '', obstacle: '', event: '', change: '', theme: '' };
+  return { protagonist: '', want: '', obstacle: '', event: '', change: '', theme: '', direction: '' };
 }
 
 function normalizeWork(w) {
@@ -255,6 +256,14 @@ function normalizeWork(w) {
     const cards = (Array.isArray(t.cards) ? t.cards : []).filter((cid, i, a) => seen.has(cid) && a.indexOf(cid) === i);
     return { id, text: t.text, src, cards, core: t.core === true };
   }).filter((t) => t.src || t.cards.length || t.core || t.text);
+  // 単語のメモ（無い古いデータは空として扱う）
+  const memoIds = new Set();
+  w.memos = (Array.isArray(w.memos) ? w.memos : []).filter((t) => t && typeof t === 'object' && typeof t.text === 'string').map((t) => {
+    let id = t.id;
+    if (typeof id !== 'string' || !id || memoIds.has(id)) id = uid();
+    memoIds.add(id);
+    return { id, text: t.text };
+  });
   syncIntermission(w);
   return w;
 }
@@ -352,7 +361,7 @@ function buildOutline() {
   const out = [`${work.title || '無題'}（${TYPES[work.type].short}）`];
   const co = work.core || newCore();
   const labels = [['protagonist', '主人公'], ['want', '求めるもの'], ['obstacle', '阻むもの'],
-    ['event', '決定的な出来事'], ['change', '最後の変化'], ['theme', 'テーマ']];
+    ['event', '決定的な出来事'], ['change', '最後の変化'], ['theme', 'テーマ'], ['direction', '演出の考え']];
   const coreParts = labels.filter(([k]) => co[k].trim()).map(([k, l]) => `${l}：${co[k].trim().replace(/\s*\n\s*/g, ' ')}`);
   if (coreParts.length) out.push(`【芯】${coreParts.join(' ／ ')}`);
   const im = intermissionOf(work);
@@ -1781,7 +1790,7 @@ function renderColumns() {
 function renderMainTabs() {
   const tab = (key, label) => h('button', { type: 'button', class: 'maintab' + (ui.tab === key ? ' active' : ''),
     dataset: { tab: key }, onclick: () => { if (ui.tab !== key) { ui.tab = key; renderMain(); window.scrollTo(0, 0); } } }, label);
-  return h('div', { class: 'maintabs' }, tab('board', 'ボード'), tab('people', '人物'), tab('core', '芯'), tab('graph', 'グラフ'), tab('idea', '発想'));
+  return h('div', { class: 'maintabs' }, tab('board', 'ボード'), tab('people', '人物'), tab('graph', 'グラフ'), tab('core', '芯'), tab('idea', '発想'));
 }
 
 // ---------- 次の一手・思いつきを1行で ----------
@@ -1858,6 +1867,7 @@ function renderQuickBar() {
 }
 
 function renderBoard() {
+  gpopClose();
   let body;
   if (ui.tab === 'people') {
     body = renderPeople();
@@ -2077,7 +2087,7 @@ function graphVisible(p) {
 
 function renderGraphChart(chars, cards, nums) {
   const N = cards.length;
-  const L = 60, R = 16, T = 30, B = 44;
+  const L = 60, R = 16, T = 30, B = 52;
   const H = Math.max(280, Math.min(420, (window.innerHeight || 700) - 260));
   const avail = Math.max(280, Math.min(app.clientWidth || 600, 1200) - 34);
   const W = Math.max(avail, N * 22 + L + R);
@@ -2115,7 +2125,7 @@ function renderGraphChart(chars, cards, nums) {
     if (im && im.blockId === b.id) {
       const xi = xe(off + Math.min(im.index, n));
       svg.append(s('line', { class: 'g-brk', x1: xi, x2: xi, y1: 6, y2: T + ph }),
-        s('text', { class: 'g-brklab', x: xi + 3, y: T + ph + 28 }, '休憩'));
+        s('text', { class: 'g-brklab', x: xi + 3, y: T + ph + 46 }, '休憩'));
     }
     off += n;
   });
@@ -2127,12 +2137,23 @@ function renderGraphChart(chars, cards, nums) {
     if ((n - 1) % every === 0) {
       svg.append(s('text', { class: 'g-xlab', x: xc(i), y: T + ph + 14, 'text-anchor': 'middle' }, `#${n}`));
     }
-    if (x.card.big) svg.append(s('text', { class: 'g-star', x: xc(i), y: T + ph + 30, 'text-anchor': 'middle' }, '★'));
+    if (x.card.big) {
+      svg.append(s('line', { class: 'g-starline', x1: xc(i), x2: xc(i), y1: T, y2: T + ph }));
+      const label = `大きなイベント #${n} ${cardLabel(x.card)}`;
+      const open = (e) => gpopShow(e.currentTarget, x.card.id, e.type === 'click' || e.type === 'keydown');
+      svg.append(s('g', { class: 'g-bigstar', tabindex: 0, role: 'button', 'aria-label': label, 'data-card': x.card.id,
+        onclick: open, onpointerenter: gpopHover, onpointerleave: gpopLeave,
+        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } } },
+        s('title', {}, label),
+        s('rect', { class: 'g-hit', x: xc(i) - 14, y: T + ph + 16, width: 28, height: 28 }),
+        s('text', { class: 'g-star', x: xc(i), y: T + ph + 36, 'text-anchor': 'middle' }, '★')));
+    }
   });
 
   // 人物ごとの階段状の線と点
   const dots = [];
-  work.characters.forEach((p) => {
+  // 登録順で早い人物ほど上に重ねる（後から描く）
+  work.characters.slice().reverse().forEach((p) => {
     if (!graphVisible(p)) return;
     const pts = [];
     cards.forEach((x, i) => { const v = x.card.states[p.id]; if (v !== undefined) pts.push({ i, v, x }); });
@@ -2145,35 +2166,71 @@ function renderGraphChart(chars, cards, nums) {
     svg.append(s('path', { class: 'g-line', d, stroke: p.color, 'data-char': p.id }));
     pts.forEach((pt) => dots.push({ p, pt, cx: xc(pt.i), cy: yv(pt.v) }));
   });
-  // 同じ値で線が重なる区間：下に隠れた人物の印を、間隔を置いて打つ（線はずらさない）
-  const vis = work.characters.filter(graphVisible);
-  const held = (p, i) => { let v; for (let k = 0; k <= i; k++) { const t = cards[k].card.states[p.id]; if (t !== undefined) v = t; } return v; };
-  const lastX = new Map();
-  for (let i = 0; i < N - 1; i++) {
-    const groups = new Map();
-    vis.forEach((p) => { const v = held(p, i); if (v !== undefined) { if (!groups.has(v)) groups.set(v, []); groups.get(v).push(p); } });
-    groups.forEach((ps, v) => {
-      const hidden = ps.slice(0, -1);
-      hidden.forEach((p, k) => {
-        const mx = xc(i) + cw / 2 + (k - (hidden.length - 1) / 2) * 12;
-        if (lastX.has(p.id) && mx - lastX.get(p.id) < 28) return;
-        lastX.set(p.id, mx);
-        svg.append(s('g', { class: 'g-ovl', 'data-char': p.id, 'pointer-events': 'none', transform: `translate(${mx - 5} ${yv(v) - 5}) scale(${10 / 12})` },
-          shapeEl(p.shape, p.color, 12, { stroke: 'var(--paper)', 'stroke-width': 1.5, 'paint-order': 'stroke' })));
-      });
-    });
-  }
   dots.forEach(({ p, pt, cx, cy }) => {
     const label = `${p.name || '（名前なし）'} #${nums.get(pt.x.card.id)} ${cardLabel(pt.x.card)} ${fmtState(pt.v).replace('+', '＋')}`;
-    const open = () => openCard(pt.x.card.id);
+    const open = (e) => gpopShow(e.currentTarget, pt.x.card.id, true);
     svg.append(s('g', { class: 'g-pt', tabindex: 0, role: 'button', 'aria-label': label, 'data-card': pt.x.card.id, 'data-char': p.id,
-      onclick: open, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } },
+      onclick: open, onpointerenter: gpopHover, onpointerleave: gpopLeave, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } } },
       s('title', {}, label),
       s('circle', { class: 'g-hit', cx, cy, r: 12 }),
       s('g', { class: 'g-dot', transform: `translate(${cx - 5.5} ${cy - 5.5}) scale(${11 / 12})` }, shapeEl(p.shape, p.color, 12, { stroke: 'var(--paper)', 'stroke-width': 1.5, 'paint-order': 'stroke' }))));
   });
   return svg;
 }
+
+// 印・★を押した所の近くの小さな吹き出し（見出しと［詳細を見る］）
+let gpop = null;       // { el, cardId, pinned, timer }
+function gpopClose() {
+  if (!gpop) return;
+  clearTimeout(gpop.timer);
+  gpop.el.remove();
+  gpop = null;
+}
+function gpopShow(anchor, cardId, pinned) {
+  if (gpop && gpop.cardId === cardId && gpop.anchor === anchor) {
+    clearTimeout(gpop.timer);
+    if (pinned) gpop.pinned = true;
+    return;
+  }
+  gpopClose();
+  const x = findCard(cardId);
+  if (!x) return;
+  const nums = numbering();
+  const el = h('div', { class: 'gpop', role: 'dialog', 'aria-label': 'カードの見出し' },
+    h('div', { class: 'gpop-title' }, `#${nums.get(cardId)} ${cardLabel(x.card)}`),
+    h('button', { type: 'button', class: 'gpop-go primary', onclick: () => { gpopClose(); openCard(cardId); } }, '詳細を見る'));
+  document.body.append(el);
+  gpop = { el, cardId, anchor, pinned: !!pinned, timer: null };
+  el.addEventListener('pointerenter', () => { if (gpop) clearTimeout(gpop.timer); });
+  el.addEventListener('pointerleave', gpopLeave);
+  // 印の近く（下、入らなければ上）。画面の端で切れないよう寄せる
+  const r = anchor.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth, vh = window.innerHeight;
+  const pw = el.offsetWidth, ph2 = el.offsetHeight;
+  let left = Math.round(r.left + r.width / 2 - pw / 2);
+  left = Math.max(8, Math.min(vw - pw - 8, left));
+  let top = Math.round(r.bottom + 2);
+  if (top + ph2 > vh - 8) top = Math.max(8, Math.round(r.top - ph2 - 2));
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+}
+function gpopCanHover(e) { return e.pointerType === 'mouse' && window.matchMedia('(hover: hover)').matches; }
+function gpopHover(e) {
+  if (!gpopCanHover(e)) return;
+  gpopShow(e.currentTarget, e.currentTarget.dataset.card || e.currentTarget.getAttribute('data-card'), false);
+  if (gpop) clearTimeout(gpop.timer);
+}
+function gpopLeave(e) {
+  if (!gpop || gpop.pinned || (e.pointerType && e.pointerType !== 'mouse')) return;
+  clearTimeout(gpop.timer);
+  gpop.timer = setTimeout(gpopClose, 250);
+}
+document.addEventListener('pointerdown', (e) => {
+  if (gpop && !gpop.el.contains(e.target)) gpopClose();
+}, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') gpopClose(); });
+window.addEventListener('scroll', () => gpopClose(), true);
+window.addEventListener('resize', () => gpopClose());
 
 function renderGraph() {
   if (!work.characters.length) {
@@ -2199,7 +2256,7 @@ function renderGraph() {
   return h('div', { class: 'page graph' },
     chips,
     h('div', { class: 'gchart-wrap' }, renderGraphChart(work.characters, cards, nums)),
-    h('p', { class: 'legend' }, '灰色＝変化なし。同じ値で線が重なる所は、下に隠れた人物の印を線の上に打つ'));
+    h('p', { class: 'legend' }, '灰色＝だれの状態も入っていないカード'));
 }
 
 // ---------- 画面：芯 ----------
@@ -2229,7 +2286,9 @@ function renderCore() {
         half('obstacle', '阻むもの', '求めるものを阻むもの')),
       line('event', '決定的な出来事', '決定的な出来事'),
       h('div', { class: 'core-arrow', 'aria-hidden': 'true' }, '↓'),
-      line('change', '最後の変化', '最後の変化')));
+      line('change', '最後の変化', '最後の変化'),
+      line('direction', '演出の考え', 'コンセプトなど')),
+    h('div', { class: 'core-extra' }, matTags(), memoBox()));
 }
 
 // ---------- 画面：発想（マンダラートと拾った言葉） ----------
@@ -2584,14 +2643,13 @@ function matPanel() {
       return h('button', { type: 'button', class: 'mat-item', dataset: { id: t.id }, onclick: () => openMaterial(t.id) },
         h('strong', {}, t.text || '（空）'), sub && h('small', {}, sub));
     }),
-    h('button', { type: 'button', class: 'mat-new ibtn', onclick: addFreeMaterial }, '＋ 書いて足す'));
+    memoBox());
 }
 
 function matTags() {
   return h('div', { class: 'mat-tags idea-mats' },
     h('div', { class: 'mat-head' }, h('strong', {}, '拾った言葉'), h('span', { class: 'mat-count' }, `${work.materials.length}件`)),
-    work.materials.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id }, onclick: () => openMaterial(t.id) }, t.text || '（空）')),
-    h('button', { type: 'button', class: 'mat-tag add mat-new', 'aria-label': '書いて拾った言葉を足す', onclick: addFreeMaterial }, '＋'));
+    work.materials.map((t) => h('button', { type: 'button', class: 'mat-tag', dataset: { id: t.id }, onclick: () => openMaterial(t.id) }, t.text || '（空）')));
 }
 
 // ----- 画面本体 -----
@@ -2673,7 +2731,7 @@ function renderIdeaWide() {
       h('button', { type: 'button', class: 'ibtn idea-back', onclick: () => { ideaGo(() => { ui.ideaOpen = null; ui.ideaBlock = null; }); ideaScrollToItem(open.id); } }, '‹ 並べる'),
       h('span', { class: 'idea-name' }, mandalaName(open)),
       h('button', { type: 'button', class: 'idea-del-wide', onclick: () => confirmDeleteMandala(open) }, 'このマンダラートを消す'));
-    const detail = h('div', { class: 'wl-detail' }, ideaBlockView(open, true, s), work.materials.length ? matTags() : null);
+    const detail = h('div', { class: 'wl-detail' }, ideaBlockView(open, true, s), work.materials.length ? matTags() : null, memoBox());
     const nine = h('div', { class: 'wl-nine' },
       mandalaEl(open, { c, tag: 'div', pad: true, sel: b, onBlock: (j) => { if (j !== ui.ideaBlock) ideaGo(() => { ui.ideaBlock = j; }); } }));
     requestAnimationFrame(ideaFitWrite);
@@ -2696,7 +2754,7 @@ function renderIdeaWide() {
         mandalaEl(m, { c, tag: 'div', pad: true,
           onBlock: (b) => { ui.ideaOpen = m.id; ui.ideaBlock = b; ui.ideaEdit = null; renderMain(); window.scrollTo(0, 0); } })))));
   }
-  const showList = !!(work.mandalas.length || work.materials.length);
+  const showList = true;
   if (work.mandalas.length === 1) requestAnimationFrame(ideaFitOne);
   return h('div', { class: 'idea-main' + (side ? '' : ' stack') },
     h('div', { class: 'idea-left' }, left),
@@ -2789,7 +2847,8 @@ function renderIdeaNarrow() {
     return h('div', { class: 'idea-empty' },
       h('p', { class: 'note' }, 'マンダラートで言葉を広げて、気になる言葉に印を付けます。'),
       h('button', { type: 'button', class: 'idea-add primary', onclick: addMandalaAndOpen }, '＋ マンダラート'),
-      work.materials.length ? matTags() : null);
+      work.materials.length ? matTags() : null,
+      memoBox());
   }
   let m = ui.ideaPick ? mandalaById(ui.ideaPick) : null;
   if (!m) { m = work.mandalas[0]; ui.ideaPick = m.id; ui.ideaBlock = null; }
@@ -2809,6 +2868,7 @@ function renderIdeaNarrow() {
         h('button', { type: 'button', class: 'idea-tab add', 'aria-label': 'マンダラートを足す', onclick: addMandalaAndOpen }, '＋')),
       pager,
       matTags(),
+      memoBox(),
       h('button', { type: 'button', class: 'idea-del', onclick: () => {
         const cur = ui.ideaPick ? mandalaById(ui.ideaPick) : null;
         if (cur) confirmDeleteMandala(cur);
@@ -2817,7 +2877,8 @@ function renderIdeaNarrow() {
   return h('div', { class: 'idea-narrow' },
     ideaBlockView(m, false),
     h('p', { class: 'idea-hint' }, '右上の ○ で印'),
-    matTags());
+    matTags(),
+    memoBox());
 }
 
 // ----- 小さな面（確認・拾った言葉） -----
@@ -2844,12 +2905,76 @@ function ideaConfirm(title, note, goLabel, onGo, onCancel) {
   modalRoot.replaceChildren(ideaOverlay(sheet, onCancel));
 }
 
-function addFreeMaterial() {
-  const t = { id: uid(), text: '', src: null, cards: [], core: false };
-  work.materials.push(t);
-  renderMaterialSheet(t.id);
-  const inp = modalRoot.querySelector('.mat-input');
-  if (inp) inp.focus();
+// ----- 単語のメモ（拾った言葉とは別の一覧）-----
+
+function memoBox() {
+  const input = h('input', { type: 'text', class: 'memo-input', 'aria-label': 'メモを書く', placeholder: 'メモを書く', enterkeyhint: 'done',
+    autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
+    onfocus: memoFocus,
+    onkeydown: (e) => {
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      addMemo(input);
+    } });
+  return h('div', { class: 'memo-box' },
+    h('div', { class: 'mat-head' }, h('strong', {}, 'メモ'), h('span', { class: 'mat-count' }, `${work.memos.length}件`)),
+    work.memos.length ? h('div', { class: 'mat-tags memo-tags' },
+      work.memos.map((t) => h('button', { type: 'button', class: 'mat-tag memo-tag', dataset: { id: t.id }, onclick: () => renderMemoSheet(t.id) }, t.text || '（空）'))) : null,
+    h('div', { class: 'memo-add' }, input,
+      h('button', { type: 'button', class: 'memo-go ibtn', onmousedown: (e) => e.preventDefault(), onclick: () => addMemo(input) }, '足す')));
+}
+
+// 発想の書く入力が開いていたら閉じてから、メモの欄を使う
+function memoFocus(e) {
+  if (ideaCur || ui.ideaEdit) {
+    ideaStopEdit();
+    document.querySelectorAll('.mcell.editing').forEach((el) => el.classList.remove('editing'));
+  }
+  const el = e.target;
+  setTimeout(() => { if (document.activeElement === el) el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 350);
+}
+
+// いまある欄を作り直す（描き直しはしない。入力を途切れさせないため）
+function refreshMemoBoxes(focus) {
+  document.querySelectorAll('.memo-box').forEach((el, k) => {
+    const nb = memoBox();
+    el.replaceWith(nb);
+    if (focus && k === 0) nb.querySelector('.memo-input').focus({ preventScroll: true });
+  });
+}
+
+function addMemo(input) {
+  const v = input.value.trim();
+  if (!v) return;
+  work.memos.push({ id: uid(), text: v });
+  changed(true);
+  refreshMemoBoxes(true);
+}
+
+function closeMemo(id) {
+  const t = work.memos.find((x) => x.id === id);
+  if (t && !t.text.trim()) { work.memos = work.memos.filter((x) => x !== t); changed(true); }
+  ideaShut();
+  refreshMemoBoxes(false);
+}
+
+function renderMemoSheet(id) {
+  ideaStopEdit();
+  const t = work.memos.find((x) => x.id === id);
+  if (!t) { ideaShut(); return; }
+  const sheet = h('div', { class: 'sheet small-sheet memo-sheet', role: 'dialog', 'aria-label': 'メモ' },
+    h('h2', {}, 'メモ'),
+    h('label', { class: 'field' }, h('span', {}, '言葉'),
+      h('input', { type: 'text', class: 'memo-edit', value: t.text, oninput: (e) => { t.text = e.target.value; changed(true); } })),
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'mat-remove memo-remove', onclick: () => {
+        work.memos = work.memos.filter((x) => x !== t);
+        changed(true);
+        ideaShut();
+        refreshMemoBoxes(false);
+      } }, '外す'),
+      h('button', { type: 'button', class: 'ibtn mat-close memo-close', onclick: () => closeMemo(id) }, '閉じる')));
+  modalRoot.replaceChildren(ideaOverlay(sheet, () => closeMemo(id)));
 }
 
 function openMaterial(id) { renderMaterialSheet(id); }

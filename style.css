@@ -416,7 +416,8 @@ button.text-btn { border: none; background: none; color: var(--ink); }
 
 /* ---------- グラフ（人物の状態の曲線） ---------- */
 .page.graph { display: grid; gap: 10px; }
-.gchips { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+.gchips { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 2px; }
+@media (max-width: 699px) { .gchips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; } }
 .gchip { display: inline-flex; flex: none; align-items: center; gap: 6px; min-height: 28px; padding: 2px 10px; font-size: 13px; white-space: nowrap; border-radius: 14px; }
 .gchip:not(.on) { color: var(--muted); background: transparent; }
 .gchip:not(.on) .pmark { opacity: .35; }
@@ -428,9 +429,13 @@ button.text-btn { border: none; background: none; color: var(--ink); }
 .gchart text { fill: var(--muted); font-size: 13px; }
 .gchart .g-blab { fill: var(--ink); font-weight: 700; font-size: 13px; }
 .gchart .g-brklab { fill: var(--ink); font-weight: 700; }
-.gchart .g-star { fill: var(--ink); font-size: 13px; }
+.gchart .g-star { fill: var(--ink); font-size: 20px; }
+.g-starline { stroke: var(--ink); stroke-width: 1; stroke-opacity: .45; pointer-events: none; }
+.g-bigstar { cursor: pointer; }
+.g-bigstar:focus { outline: none; }
+.g-bigstar:hover .g-star, .g-bigstar:focus .g-star { fill-opacity: .7; }
 .gchart .g-ylab { fill: var(--ink); }
-.g-gap { fill: var(--muted); fill-opacity: .12; }
+.g-gap { fill: var(--muted); fill-opacity: .06; }
 .g-grid { stroke: var(--line); stroke-width: 1; }
 .g-zero { stroke: var(--muted); stroke-width: 1.5; }
 .g-block { stroke: var(--line); stroke-width: 1; }
@@ -587,11 +592,9 @@ button.mblock-btn { padding: 0; min-height: 0; border: none; background: none; b
 .mat-sub { margin: 0 0 6px; color: var(--muted); font-size: 13px; }
 .mat-item { display: grid; gap: 2px; width: 100%; text-align: left; border: none; border-top: 1px solid var(--line); border-radius: 0; background: none; padding: 8px 2px; min-height: 44px; }
 .mat-item small { color: var(--muted); font-size: 13px; }
-.mat-new { text-align: left; }
 
 .mat-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .mat-tag { min-height: 44px; padding: 2px 14px; border-radius: 22px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
-.mat-tag.add { border-style: dashed; color: var(--ink); }
 .idea-mats { margin-top: 12px; }
 .card-mats .mat-tags { align-items: center; }
 .core-mats { margin-top: 12px; display: grid; gap: 4px; }
@@ -675,3 +678,19 @@ button.idea-del { justify-self: center; align-self: center; margin: 0 auto; disp
 button.idea-go.danger { background: var(--alert); border-color: var(--alert); color: var(--paper); }
 .mat-tags .mat-head { flex: 0 0 100%; width: 100%; }
 button.mat-remove { align-self: center; }
+
+/* グラフの印・★の吹き出し */
+.gpop { position: fixed; z-index: 60; max-width: min(260px, calc(100vw - 16px)); background: var(--paper); border: 1px solid var(--ink); border-radius: 8px; padding: 8px 10px; display: grid; gap: 6px; justify-items: start; }
+.gpop-title { font-size: 14px; font-weight: 700; color: var(--ink); overflow-wrap: anywhere; }
+.gpop-go { min-height: 32px; padding: 0 12px; font-size: 13px; }
+
+/* 単語のメモ・芯の下の一覧 */
+.core-extra { margin-top: 12px; display: grid; gap: 4px; }
+.core-extra .idea-mats { margin-top: 0; }
+.memo-box { display: grid; gap: 6px; margin-top: 12px; }
+.memo-box .mat-tags { margin: 0; }
+.memo-add { display: flex; gap: 6px; align-items: center; }
+.memo-input { border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; background: var(--paper); flex: 1 1 auto; min-width: 0; min-height: 44px; font-size: 16px; }
+.memo-go { flex: none; min-height: 44px; padding: 0 16px; font-size: 16px; }
+button.memo-remove { background: none; border: none; box-shadow: none; padding: 2px 6px; min-height: 24px; width: auto; color: var(--muted); font-size: 13px; align-self: center; }
+.memo-edit { border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font-size: 16px; min-height: 44px; }
