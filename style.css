@@ -464,11 +464,13 @@ button.text-btn { border: none; background: none; color: var(--ink); }
 .g-pt.dim { opacity: .35; }
 .gchart .g-barlab { fill: var(--ink); font-weight: 700; }
 .g-barbase { stroke: var(--muted); stroke-width: 1; }
-.g-barfill { stroke: var(--ink); stroke-opacity: .25; stroke-width: 1; }
+.g-areafill { fill-opacity: .15; stroke: none; pointer-events: none; }
+.g-moveline { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; pointer-events: none; }
+.g-mdot { stroke: var(--paper); stroke-width: 1.5; }
 .gchart .g-barstar { fill: var(--ink); font-size: 16px; }
 .g-bar { cursor: pointer; }
 .g-bar:focus { outline: none; }
-.g-bar:hover .g-barfill, .g-bar:focus .g-barfill { stroke-opacity: .8; }
+.g-bar:hover .g-mdot, .g-bar:focus .g-mdot { stroke: var(--ink); }
 
 p.legend { margin: 0; font-size: 13px; color: var(--muted); }
 

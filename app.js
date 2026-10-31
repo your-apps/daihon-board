@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-31i';
+const APP_BUILD = '2026-10-31j';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -2122,6 +2122,32 @@ function cardMoves(cards) {
   return moves;
 }
 
+// 点と点のあいだで値をはみ出さないなめらかな線（Fritsch–Carlson の単調3次補間）の SVG パス
+function monotonePath(pts) {
+  const n = pts.length;
+  if (!n) return '';
+  let d = `M${pts[0][0]} ${pts[0][1]}`;
+  if (n === 1) return d;
+  const dx = [], sl = [];
+  for (let k = 0; k < n - 1; k++) {
+    dx[k] = pts[k + 1][0] - pts[k][0];
+    sl[k] = (pts[k + 1][1] - pts[k][1]) / dx[k];
+  }
+  const mt = [sl[0]];
+  for (let k = 1; k < n - 1; k++) mt[k] = sl[k - 1] * sl[k] <= 0 ? 0 : (sl[k - 1] + sl[k]) / 2;
+  mt[n - 1] = sl[n - 2];
+  for (let k = 0; k < n - 1; k++) {
+    if (sl[k] === 0) { mt[k] = 0; mt[k + 1] = 0; continue; }
+    const a = mt[k] / sl[k], b = mt[k + 1] / sl[k], r = a * a + b * b;
+    if (r > 9) { const tau = 3 / Math.sqrt(r); mt[k] = tau * a * sl[k]; mt[k + 1] = tau * b * sl[k]; }
+  }
+  for (let k = 0; k < n - 1; k++) {
+    const h3 = dx[k] / 3;
+    d += `C${pts[k][0] + h3} ${pts[k][1] + mt[k] * h3} ${pts[k + 1][0] - h3} ${pts[k + 1][1] - mt[k + 1] * h3} ${pts[k + 1][0]} ${pts[k + 1][1]}`;
+  }
+  return d;
+}
+
 function renderGraphChart(chars, cards, nums) {
   const N = cards.length;
   const th = graphThreadSel();
@@ -2149,7 +2175,7 @@ function renderGraphChart(chars, cards, nums) {
     });
   }
   // 状態が誰にも入っていないカードの帯
-  cards.forEach((x, i) => {
+  if (!th) cards.forEach((x, i) => {
     if (!work.characters.some((p) => x.card.states[p.id] !== undefined)) {
       svg.append(s('rect', { class: 'g-gap', x: xe(i), y: T, width: cw, height: ph }));
     }
@@ -2239,20 +2265,23 @@ function renderGraphChart(chars, cards, nums) {
     const mx = Math.max(0, ...cards.filter(inTh).map((x) => moves.get(x.card.id)));
     svg.append(s('text', { class: 'g-barlab', x: L, y: yTop + 13 }, `盛り上がり（${th.name || '（名前なし）'}）`),
       s('line', { class: 'g-barbase', x1: L, x2: W - R, y1: base, y2: base }));
-    cards.forEach((x, i) => {
-      if (!inTh(x)) return;
-      const m = moves.get(x.card.id);
-      const bh = mx > 0 ? m / mx * BAR_H : 0;
-      const bw = Math.max(4, Math.min(cw * 0.6, 28));
-      const label = `盛り上がり #${nums.get(x.card.id)} ${cardLabel(x.card)} 動き ${m}`;
-      const open = (e) => gpopShow(e.currentTarget, x.card.id, true);
-      svg.append(s('g', { class: 'g-bar', tabindex: 0, role: 'button', 'aria-label': label, 'data-card': x.card.id, 'data-move': m,
+    const mp = [];
+    cards.forEach((x, i) => { if (inTh(x)) mp.push({ x, i, m: moves.get(x.card.id), px: xc(i), py: base - (mx > 0 ? moves.get(x.card.id) / mx * BAR_H : 0) }); });
+    const curve = monotonePath(mp.map((q) => [q.px, q.py]));
+    if (mp.length > 1) {
+      svg.append(s('path', { class: 'g-areafill', d: `${curve}L${mp[mp.length - 1].px} ${base}L${mp[0].px} ${base}Z`, fill: th.color }),
+        s('path', { class: 'g-moveline', d: curve, stroke: th.color }));
+    }
+    mp.forEach((q) => {
+      const label = `盛り上がり #${nums.get(q.x.card.id)} ${cardLabel(q.x.card)} 動き ${q.m}`;
+      const open = (e) => gpopShow(e.currentTarget, q.x.card.id, true);
+      svg.append(s('g', { class: 'g-bar', tabindex: 0, role: 'button', 'aria-label': label, 'data-card': q.x.card.id, 'data-move': q.m,
         onclick: open, onpointerenter: gpopHover, onpointerleave: gpopLeave,
         onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } } },
         s('title', {}, label),
-        s('rect', { class: 'g-hit', x: xc(i) - Math.max(bw, 24) / 2, y: yTop + 18, width: Math.max(bw, 24), height: BAR_H }),
-        s('rect', { class: 'g-barfill', x: xc(i) - bw / 2, y: base - bh, width: bw, height: bh, fill: th.color }),
-        x.card.big && s('text', { class: 'g-barstar', x: xc(i), y: base - bh - 3, 'text-anchor': 'middle' }, '★')));
+        s('circle', { class: 'g-hit', cx: q.px, cy: q.py, r: 12 }),
+        s('circle', { class: 'g-mdot', cx: q.px, cy: q.py, r: 3.5, fill: th.color }),
+        q.x.card.big && s('text', { class: 'g-barstar', x: q.px, y: q.py - 8, 'text-anchor': 'middle' }, '★')));
     });
   }
   return svg;
@@ -2346,7 +2375,7 @@ function renderGraph() {
     threadChips,
     chips,
     h('div', { class: 'gchart-wrap' }, renderGraphChart(work.characters, cards, nums)),
-    h('p', { class: 'legend' }, '灰色＝だれの状態も入っていないカード'));
+    !th && h('p', { class: 'legend' }, '灰色＝だれの状態も入っていないカード'));
 }
 
 // ---------- 画面：芯 ----------
