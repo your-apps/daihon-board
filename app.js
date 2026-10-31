@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-31e';
+const APP_BUILD = '2026-10-31g';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -1455,11 +1455,15 @@ async function onImportFile(file) {
 
 function showImportConfirm(w, exportedAt) {
   const local = readWork(w.id);
-  const col = (label, x) => h('div', { class: 'cmp-col' },
-    h('strong', {}, label),
+  const col = (label, x, newer) => h('div', { class: 'cmp-col' + (newer ? ' newer' : '') },
+    h('strong', {}, label, newer && h('span', { class: 'cmp-new' }, '新しい')),
     h('div', {}, x.title || '無題'),
-    h('div', { class: 'cmp-sub' }, `最終更新 ${formatDate(x.updatedAt)}`),
+    h('div', { class: 'cmp-sub' }, '最終更新 ', h('span', { class: 'cmp-date' }, formatDate(x.updatedAt))),
     h('div', { class: 'cmp-sub' }, `カード ${cardCount(x)}枚`));
+  const tfile = new Date(w.updatedAt).getTime();
+  const tloc = local ? new Date(local.updatedAt).getTime() : NaN;
+  const fileNewer = !!local && tfile > tloc;
+  const localNewer = !!local && tloc > tfile;
   let note;
   if (!local) {
     note = h('p', { class: 'import-note' }, 'この端末に新しく加えます');
@@ -1472,7 +1476,7 @@ function showImportConfirm(w, exportedAt) {
   }
   const sheet = h('div', { class: 'sheet small-sheet import-sheet', role: 'dialog', 'aria-label': '読み込みの確認' },
     h('h2', {}, 'ファイルから読み込む'),
-    h('div', { class: 'cmp' }, col('ファイル', w), local && col('この端末', local)),
+    h('div', { class: 'cmp' + (local ? '' : ' one') }, col('ファイル', w, fileNewer), local && col('この端末', local, localNewer)),
     note,
     local && h('p', { class: 'note' }, '置き換える前に、端末内の版を控えに残します。'),
     h('div', { class: 'actions' },
@@ -1579,7 +1583,13 @@ function renderWorks() {
 
   return h('div', { class: 'page works' },
     !ui.storageOk && h('div', { class: 'banner' }, 'この画面では保存できません。閉じると消えます。'),
-    h('h1', {}, '台本ボード'),
+    h('div', { class: 'works-head' },
+      h('h1', {}, '台本ボード'),
+      h('button', { type: 'button', class: 'primary new-work-btn', onclick: () => {
+        ui.newWorkOpen = true; renderMain();
+        const el = document.querySelector('.new-work input[type=text]');
+        if (el) el.focus();
+      } }, '＋新しい作品')),
     works.length
       ? h('ul', { class: 'work-list' }, works.map((w) => {
           const n = cardCount(w);
@@ -1605,11 +1615,7 @@ function renderWorks() {
           h('div', { class: 'actions' },
             h('button', { type: 'submit', class: 'primary' }, '作る'),
             h('button', { type: 'button', class: 'new-work-cancel', onclick: () => { ui.newWorkOpen = false; renderMain(); } }, 'やめる')))
-      : h('div', {}, h('button', { type: 'button', class: 'primary new-work-btn', onclick: () => {
-          ui.newWorkOpen = true; renderMain();
-          const el = document.querySelector('.new-work input[type=text]');
-          if (el) el.focus();
-        } }, '＋新しい作品')),
+      : null,
     h('div', { class: 'works-more' },
       h('div', { class: 'import-row' },
         h('button', { type: 'button', class: 'import-btn', onclick: () => importInput.click() }, 'ファイルから読み込む'),
@@ -1629,6 +1635,7 @@ function renderTopbar() {
     h('button', { type: 'button', class: 'link', onclick: closeWork }, '‹ 一覧'),
     h('button', { type: 'button', class: 'title-btn', onclick: openSettings, title: '作品の設定' }, work.title || '無題'),
     h('span', { class: 'type' }, TYPES[work.type].short),
+    h('button', { type: 'button', class: 'settings-btn', onclick: openSettings }, '設定'),
     h('span', { id: 'status', class: 'status' }, statusLabel()[0]));
 }
 
@@ -2070,8 +2077,9 @@ function graphVisible(p) {
 
 function renderGraphChart(chars, cards, nums) {
   const N = cards.length;
-  const L = 60, R = 16, T = 30, B = 44, H = 280;
-  const avail = Math.max(280, (app.clientWidth || 600) - 34);
+  const L = 60, R = 16, T = 30, B = 44;
+  const H = Math.max(280, Math.min(420, (window.innerHeight || 700) - 260));
+  const avail = Math.max(280, Math.min(app.clientWidth || 600, 1200) - 34);
   const W = Math.max(avail, N * 22 + L + R);
   const cw = (W - L - R) / N;
   const xc = (i) => L + (i + 0.5) * cw;
@@ -2113,10 +2121,10 @@ function renderGraphChart(chars, cards, nums) {
   });
 
   // 横軸：#n と大きなイベント
-  const every = cw >= 18 ? 1 : 5;
+  const every = Math.max(1, Math.ceil((String(N).length * 8 + 14) / cw));
   cards.forEach((x, i) => {
     const n = i + 1;
-    if (every === 1 || n === 1 || n % every === 0) {
+    if ((n - 1) % every === 0) {
       svg.append(s('text', { class: 'g-xlab', x: xc(i), y: T + ph + 14, 'text-anchor': 'middle' }, `#${n}`));
     }
     if (x.card.big) svg.append(s('text', { class: 'g-star', x: xc(i), y: T + ph + 30, 'text-anchor': 'middle' }, '★'));
@@ -2137,6 +2145,24 @@ function renderGraphChart(chars, cards, nums) {
     svg.append(s('path', { class: 'g-line', d, stroke: p.color, 'data-char': p.id }));
     pts.forEach((pt) => dots.push({ p, pt, cx: xc(pt.i), cy: yv(pt.v) }));
   });
+  // 同じ値で線が重なる区間：下に隠れた人物の印を、間隔を置いて打つ（線はずらさない）
+  const vis = work.characters.filter(graphVisible);
+  const held = (p, i) => { let v; for (let k = 0; k <= i; k++) { const t = cards[k].card.states[p.id]; if (t !== undefined) v = t; } return v; };
+  const lastX = new Map();
+  for (let i = 0; i < N - 1; i++) {
+    const groups = new Map();
+    vis.forEach((p) => { const v = held(p, i); if (v !== undefined) { if (!groups.has(v)) groups.set(v, []); groups.get(v).push(p); } });
+    groups.forEach((ps, v) => {
+      const hidden = ps.slice(0, -1);
+      hidden.forEach((p, k) => {
+        const mx = xc(i) + cw / 2 + (k - (hidden.length - 1) / 2) * 12;
+        if (lastX.has(p.id) && mx - lastX.get(p.id) < 28) return;
+        lastX.set(p.id, mx);
+        svg.append(s('g', { class: 'g-ovl', 'data-char': p.id, 'pointer-events': 'none', transform: `translate(${mx - 5} ${yv(v) - 5}) scale(${10 / 12})` },
+          shapeEl(p.shape, p.color, 12, { stroke: 'var(--paper)', 'stroke-width': 1.5, 'paint-order': 'stroke' })));
+      });
+    });
+  }
   dots.forEach(({ p, pt, cx, cy }) => {
     const label = `${p.name || '（名前なし）'} #${nums.get(pt.x.card.id)} ${cardLabel(pt.x.card)} ${fmtState(pt.v).replace('+', '＋')}`;
     const open = () => openCard(pt.x.card.id);
@@ -2152,7 +2178,9 @@ function renderGraphChart(chars, cards, nums) {
 function renderGraph() {
   if (!work.characters.length) {
     return h('div', { class: 'page graph' },
-      h('p', { class: 'note' }, 'まだ人物がいません。'));
+      h('div', { class: 'empty-people' },
+        h('p', { class: 'note' }, 'まだ人物がいません。'),
+        h('button', { type: 'button', class: 'primary add-person-direct', onclick: () => promptAddEntity('characters', '人物の名前') }, '＋人物を足す')));
   }
   const cards = allCards();
   const anyState = work.characters.some(charHasStates);
@@ -2171,7 +2199,7 @@ function renderGraph() {
   return h('div', { class: 'page graph' },
     chips,
     h('div', { class: 'gchart-wrap' }, renderGraphChart(work.characters, cards, nums)),
-    h('p', { class: 'legend' }, '灰色＝変化なし'));
+    h('p', { class: 'legend' }, '灰色＝変化なし。同じ値で線が重なる所は、下に隠れた人物の印を線の上に打つ'));
 }
 
 // ---------- 画面：芯 ----------
@@ -3129,9 +3157,10 @@ function renderCardSheet() {
     }
     // 種のボタンがあるときは label で包まない（見出しを押すと、中の最初のボタンが押されてしまうため）
     if (row) ta.setAttribute('aria-label', label);
-    return h(row ? 'div' : 'label', { class: 'field', dataset: { field: key } },
-      h('span', {}, label),
-      row, ta, list);
+    const main = ['conflict', 'event', 'change'].includes(key);
+    return h(row ? 'div' : 'label', { class: 'field' + (main ? ' main' : ''), dataset: { field: key } },
+      row ? h('div', { class: 'fhead' }, h('span', {}, label), row) : h('span', {}, label),
+      ta, list);
   };
 
   // 3項目まとめてランダム（種が1つも無ければ出さない）
@@ -3167,7 +3196,7 @@ function renderCardSheet() {
     memoField(c),
     h('div', { class: 'actions' },
       h('span', { class: 'grow' }),
-      h('button', { type: 'button', class: 'danger', onclick: () => {
+      h('button', { type: 'button', class: 'del-start', onclick: () => {
         if (!confirm('このカードを削除しますか？元に戻せません。')) return;
         pushHistory(work, 'カード削除の前');
         deleteCard(c.id);
@@ -3240,7 +3269,7 @@ function openSettings() {
     h('div', { class: 'field' },
       h('span', {}, 'ファイルに書き出す'),
       h('div', { class: 'actions' },
-        h('button', { type: 'button', class: 'primary export-btn settings-export', onclick: exportWork }, '書き出す'),
+        h('button', { type: 'button', class: 'export-btn settings-export', onclick: exportWork }, '書き出す'),
         isUnexported(work) ? h('small', { class: 'unexp-note' }, 'まだ書き出していません') : h('small', {}, '書き出し済み')),
       isIOS() && h('small', { class: 'export-hint' }, IOS_HINT)),
     h('div', { class: 'actions' },
@@ -3252,7 +3281,7 @@ function openSettings() {
     historySection(),
     h('div', { class: 'actions' },
       h('span', { class: 'grow' }),
-      h('button', { type: 'button', class: 'danger', onclick: () => {
+      h('button', { type: 'button', class: 'settings-del', onclick: () => {
         if (!confirmDeleteWork(work)) return;
         deleteWorkData(work.id);
         clearTimeout(saveTimer); saveTimer = null;
