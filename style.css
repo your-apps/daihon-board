@@ -334,10 +334,22 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .ptable .rname .rn { display: inline-block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
 .ptable .rname .cnt { display: block; font-size: 13px; font-weight: 400; color: var(--muted); }
 .ptable td.pc { height: 36px; min-width: 36px; cursor: pointer; }
-.ptable td.pc.on { background: var(--sunk); }
 .ptable td.pc:active { background: var(--line); }
-.ptable .pdot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); vertical-align: middle; }
-.ptable .pv { font-weight: 700; color: var(--ink); }
+/* 香盤表：続けて出ている間を1本の帯にする（始まり＝登場、終わり＝退場） */
+.ptable td.pc.on { position: relative; }
+/* 薄い地は ::before、人物の色の枠は ::after */
+.ptable td.pc.on::before, .ptable td.pc.on::after { content: ""; position: absolute; top: 6px; bottom: 6px; left: 0; right: -1px; pointer-events: none; }
+.ptable td.pc.on::before { background: var(--pc); opacity: .24; }
+.ptable td.pc.on::after { border: 2px solid var(--pc); border-left-width: 0; border-right-width: 0; }
+.ptable td.pc.on.run-start::before, .ptable td.pc.on.run-start::after { left: 3px; border-radius: 6px 0 0 6px; }
+.ptable td.pc.on.run-end::before, .ptable td.pc.on.run-end::after { right: 3px; border-radius: 0 6px 6px 0; }
+.ptable td.pc.on.run-start.run-end::before, .ptable td.pc.on.run-start.run-end::after { border-radius: 6px; }
+.ptable td.pc.on.run-start::after { border-left-width: 2px; }
+.ptable td.pc.on.run-end::after { border-right-width: 2px; }
+.ptable .pv { position: relative; font-weight: 700; color: var(--ink); }
+.people-tools { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.print-btn { min-height: 32px; padding: 4px 14px; font-size: 14px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
+.print-title { display: none; }
 .ptable .brk, .ptable thead tr:nth-child(2) th.brk, .ptable td.brk { min-width: 5px; width: 5px; max-width: 5px; padding: 0; background: var(--ink); }
 .people-links .to-graph { border: 1px solid var(--line); background: var(--paper); color: var(--ink); min-height: 32px; padding: 4px 14px; font-size: 14px; }
 
@@ -445,6 +457,18 @@ button.text-btn { border: none; background: none; color: var(--ink); }
 .g-dot { cursor: pointer; }
 .g-pt:hover .g-dot > *, .g-pt:focus .g-dot > * { stroke: var(--ink); }
 .g-pt:focus { outline: none; }
+.gthreads { align-items: center; }
+.g-tcol { fill: var(--sunk); pointer-events: none; }
+.g-veil { fill: var(--paper); fill-opacity: .6; pointer-events: none; }
+.g-line.dim { opacity: .2; }
+.g-pt.dim { opacity: .35; }
+.gchart .g-barlab { fill: var(--ink); font-weight: 700; }
+.g-barbase { stroke: var(--muted); stroke-width: 1; }
+.g-barfill { stroke: var(--ink); stroke-opacity: .25; stroke-width: 1; }
+.gchart .g-barstar { fill: var(--ink); font-size: 16px; }
+.g-bar { cursor: pointer; }
+.g-bar:focus { outline: none; }
+.g-bar:hover .g-barfill, .g-bar:focus .g-barfill { stroke-opacity: .8; }
 
 p.legend { margin: 0; font-size: 13px; color: var(--muted); }
 
@@ -694,3 +718,27 @@ button.mat-remove { align-self: center; }
 .memo-go { flex: none; min-height: 44px; padding: 0 16px; font-size: 16px; }
 button.memo-remove { background: none; border: none; box-shadow: none; padding: 2px 6px; min-height: 24px; width: auto; color: var(--muted); font-size: 13px; align-self: center; }
 .memo-edit { border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font-size: 16px; min-height: 44px; }
+
+/* ---------- 印刷（香盤表：横向き。人物の画面を紙に収める） ---------- */
+@media print {
+  @page { size: landscape; margin: 8mm; }
+  html, body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .stickyhead, .export-bar, .banner, .nextbar, .quickbar, #idea-bar, #modal-root, .toast, .undo-toast, .lift-bar, .gpop,
+  .people-tools, .people-links, .ent-edit, .build-label { display: none !important; }
+  .page, .page.people { padding: 0; max-width: none; margin: 0; }
+  .print-title { display: block; margin: 0 0 6px; font-size: 14pt; }
+  .ptable-wrap { overflow: visible; width: 100%; max-width: none; max-height: none; border: none; border-radius: 0; background: none; }
+  .ptable { table-layout: fixed; width: 100%; font-size: 9pt; }
+  .ptable .c-name { width: 26mm; }
+  .ptable .c-brk { width: 2mm; }
+  .ptable thead th, .ptable .corner, .ptable .rname { position: static; }
+  .ptable thead tr:first-child th { font-size: 9pt; padding: 2px 4px; overflow: hidden; }
+  .ptable thead tr:nth-child(2) th { min-width: 0; font-size: 9pt; overflow: hidden; }
+  .ptable .corner, .ptable .rname { min-width: 0; max-width: none; width: 26mm; padding: 2px 4px; white-space: normal; }
+  .ptable .rname .rn { max-width: none; white-space: normal; overflow: visible; text-overflow: clip; }
+  .ptable .rname .cnt { font-size: 9pt; }
+  .ptable td.pc { height: 9mm; min-width: 0; }
+  .ptable .pv { font-size: 9pt; }
+  .ptable tr { break-inside: avoid; }
+}

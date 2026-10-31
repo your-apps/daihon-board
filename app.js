@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-31h';
+const APP_BUILD = '2026-10-31i';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -67,6 +67,7 @@ const ui = {
   entOpen: null, // 色の欄を開いている人物・筋のid（1つだけ）
   entEditOpen: false, // 人物タブの登録（編集）を開いているか
   graphOn: {},       // グラフで表示する人物（人物id → true/false）。この画面の中だけ。データには入れない
+  graphThread: null, // グラフで選んでいる筋のid（null＝すべて）。この画面の中だけ。データには入れない
   lastSnap: null,    // { id, t }：履歴に最後に控えを取った時刻
   lifted: null,      // 持ち上げ中のもの { kind: 'card', id }。この画面の中だけ
   undo: null,        // 動かした直後の［元に戻す］用 { snap, workId, timer, item }
@@ -2022,27 +2023,38 @@ function renderPeopleTable() {
       : h('th', { class: 'ch' + cls }, `#${nums.get(col.card.id)}`);
   })));
 
+  // 香盤表：列の並び（休憩で区切る）。続けて出ている間を1本の帯にする
+  const flat = groups.flatMap((g, gi) => g.cols.map((col, ci) => ({ col, bs: ci === 0 && gi > 0 })));
+  const colgroup = h('colgroup', {}, h('col', { class: 'c-name' }), flat.map((f) => h('col', { class: f.col.brk ? 'c-brk' : 'c-card' })));
   const rows = work.characters.map((p) => {
     const count = allCards().filter((x) => x.card.characters.includes(p.id)).length;
+    const onAt = (k) => !!(flat[k] && !flat[k].col.brk && flat[k].col.card.characters.includes(p.id));
     return h('tr', {},
       h('th', { class: 'rname', scope: 'row' },
         personMark(p, 12),
         h('span', { class: 'rn', dataset: { pname: p.id } }, p.name || '（名前なし）'),
         h('span', { class: 'cnt' }, `${count}枚`)),
-      groups.flatMap((g, gi) => g.cols.map((col, ci) => {
-        const bs = ci === 0 && gi > 0 ? ' bs' : '';
-        if (col.brk) return h('td', { class: 'brk' + bs });
-        const c = col.card;
-        const on = c.characters.includes(p.id);
+      flat.map((f, k) => {
+        const bs = f.bs ? ' bs' : '';
+        if (f.col.brk) return h('td', { class: 'brk' + bs });
+        const c = f.col.card;
+        const on = onAt(k);
         const v = on ? c.states[p.id] : undefined;
-        return h('td', { class: 'pc' + (on ? ' on' : '') + bs, dataset: { card: c.id, char: p.id },
-          onclick: () => openCard(c.id) },
-          v !== undefined ? h('span', { class: 'pv' }, fmtState(v)) : on && h('span', { class: 'pdot' }));
-      })));
+        // 帯の始まり（登場）と終わり（退場）。休憩の列で帯は切れる
+        const band = on ? (onAt(k - 1) ? '' : ' run-start') + (onAt(k + 1) ? '' : ' run-end') : '';
+        return h('td', { class: 'pc' + (on ? ' on' : '') + band + bs, dataset: { card: c.id, char: p.id },
+          style: on ? `--pc:${p.color}` : null, onclick: () => openCard(c.id) },
+          v !== undefined && h('span', { class: 'pv' }, fmtState(v)));
+      }));
   });
 
   return h('div', { class: 'ptable-wrap' },
-    h('table', { class: 'ptable' }, h('thead', {}, head1, head2), h('tbody', {}, rows)));
+    h('table', { class: 'ptable' }, colgroup, h('thead', {}, head1, head2), h('tbody', {}, rows)));
+}
+
+// 印刷：呼ぶだけ。枠の中などで印刷できない環境では、例外が出たときだけ知らせる
+function printKoban() {
+  try { window.print(); } catch (err) { showToast('この画面では印刷できません'); }
 }
 
 function renderPeople() {
@@ -2052,7 +2064,10 @@ function renderPeople() {
     entitySection('threads', '筋', '＋筋を足す', '筋の名前'));
   return h('div', { class: 'page people' },
     work.characters.length
-      ? [renderPeopleTable(),
+      ? [h('div', { class: 'people-tools' },
+           h('button', { type: 'button', class: 'print-btn', onclick: printKoban }, '印刷')),
+         h('div', { class: 'print-title' }, h('b', {}, work.title || '無題'), h('span', {}, '　香盤表')),
+         renderPeopleTable(),
          h('div', { class: 'actions people-links' },
            h('button', { type: 'button', class: 'link to-graph', onclick: () => { ui.tab = 'graph'; renderMain(); window.scrollTo(0, 0); } }, 'グラフで見る'))]
       : h('div', { class: 'empty-people' },
@@ -2085,20 +2100,54 @@ function graphVisible(p) {
   return ui.graphOn[p.id] !== undefined ? ui.graphOn[p.id] : charHasStates(p);
 }
 
+// 選んでいる筋（なければ null）
+function graphThreadSel() {
+  return ui.graphThread ? work.threads.find((t) => t.id === ui.graphThread) || null : null;
+}
+
+// カードごとの「盛り上がり」：各人物の、前に値を入れたカードからの差の絶対値の合計（値のない人物は0）
+function cardMoves(cards) {
+  const moves = new Map();
+  const prev = {};
+  cards.forEach((x) => {
+    let sum = 0;
+    work.characters.forEach((p) => {
+      const v = x.card.states[p.id];
+      if (v === undefined) return;
+      if (prev[p.id] !== undefined) sum += Math.abs(v - prev[p.id]);
+      prev[p.id] = v;
+    });
+    moves.set(x.card.id, sum);
+  });
+  return moves;
+}
+
 function renderGraphChart(chars, cards, nums) {
   const N = cards.length;
+  const th = graphThreadSel();
+  const inTh = (x) => !!th && x.card.threads.includes(th.id);
+  const thChars = new Set();
+  if (th) cards.forEach((x) => { if (inTh(x)) x.card.characters.forEach((id) => thChars.add(id)); });
+  const BAR_H = 56, BAR_EXTRA = th ? 4 + 18 + BAR_H + 8 : 0;
   const L = 60, R = 16, T = 30, B = 52;
-  const H = Math.max(280, Math.min(420, (window.innerHeight || 700) - 260));
+  const H0 = Math.max(280, Math.min(420, (window.innerHeight || 700) - 260));
+  const H = H0 + BAR_EXTRA;
   const avail = Math.max(280, Math.min(app.clientWidth || 600, 1200) - 34);
   const W = Math.max(avail, N * 22 + L + R);
   const cw = (W - L - R) / N;
   const xc = (i) => L + (i + 0.5) * cw;
   const xe = (i) => L + i * cw; // i 枚目の左の縁
-  const ph = H - T - B;
+  const ph = H0 - T - B;
   const yv = (v) => T + (3 - v) / 6 * ph;
   const svg = s('svg', { class: 'gchart', width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'group',
     'aria-label': '人物の状態のグラフ。横は左からカードの順、縦は幸（＋3）から不幸（−3）' });
 
+  // 選んだ筋のカードの列を少し濃く
+  if (th) {
+    cards.forEach((x, i) => {
+      if (inTh(x)) svg.append(s('rect', { class: 'g-tcol', x: xe(i), y: T, width: cw, height: ph, 'data-card': x.card.id }));
+    });
+  }
   // 状態が誰にも入っていないカードの帯
   cards.forEach((x, i) => {
     if (!work.characters.some((p) => x.card.states[p.id] !== undefined)) {
@@ -2163,18 +2212,49 @@ function renderGraphChart(chars, cards, nums) {
       if (k > 0) d += `H${xc(pt.i)}V${yv(pt.v)}`;
     });
     d += `H${xc(N - 1)}`;
-    svg.append(s('path', { class: 'g-line', d, stroke: p.color, 'data-char': p.id }));
+    svg.append(s('path', { class: 'g-line' + (th && !thChars.has(p.id) ? ' dim' : ''), d, stroke: p.color, 'data-char': p.id }));
     pts.forEach((pt) => dots.push({ p, pt, cx: xc(pt.i), cy: yv(pt.v) }));
   });
+  // 筋を選んでいるとき、ほかのカードの列を薄く（線の上にかぶせる）
+  if (th) {
+    cards.forEach((x, i) => {
+      if (!inTh(x)) svg.append(s('rect', { class: 'g-veil', x: xe(i), y: T, width: cw, height: ph }));
+    });
+  }
   dots.forEach(({ p, pt, cx, cy }) => {
     const label = `${p.name || '（名前なし）'} #${nums.get(pt.x.card.id)} ${cardLabel(pt.x.card)} ${fmtState(pt.v).replace('+', '＋')}`;
     const open = (e) => gpopShow(e.currentTarget, pt.x.card.id, true);
-    svg.append(s('g', { class: 'g-pt', tabindex: 0, role: 'button', 'aria-label': label, 'data-card': pt.x.card.id, 'data-char': p.id,
+    svg.append(s('g', { class: 'g-pt' + (th && (!thChars.has(p.id) || !inTh(pt.x)) ? ' dim' : ''), tabindex: 0, role: 'button', 'aria-label': label, 'data-card': pt.x.card.id, 'data-char': p.id,
       onclick: open, onpointerenter: gpopHover, onpointerleave: gpopLeave, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } } },
       s('title', {}, label),
       s('circle', { class: 'g-hit', cx, cy, r: 12 }),
       s('g', { class: 'g-dot', transform: `translate(${cx - 5.5} ${cy - 5.5}) scale(${11 / 12})` }, shapeEl(p.shape, p.color, 12, { stroke: 'var(--paper)', 'stroke-width': 1.5, 'paint-order': 'stroke' }))));
   });
+
+  // 曲線の下：選んだ筋の盛り上がり（カードごとの状態の動きの合計）
+  if (th) {
+    const moves = cardMoves(cards);
+    const yTop = T + ph + B + 4;
+    const base = yTop + 18 + BAR_H;
+    const mx = Math.max(0, ...cards.filter(inTh).map((x) => moves.get(x.card.id)));
+    svg.append(s('text', { class: 'g-barlab', x: L, y: yTop + 13 }, `盛り上がり（${th.name || '（名前なし）'}）`),
+      s('line', { class: 'g-barbase', x1: L, x2: W - R, y1: base, y2: base }));
+    cards.forEach((x, i) => {
+      if (!inTh(x)) return;
+      const m = moves.get(x.card.id);
+      const bh = mx > 0 ? m / mx * BAR_H : 0;
+      const bw = Math.max(4, Math.min(cw * 0.6, 28));
+      const label = `盛り上がり #${nums.get(x.card.id)} ${cardLabel(x.card)} 動き ${m}`;
+      const open = (e) => gpopShow(e.currentTarget, x.card.id, true);
+      svg.append(s('g', { class: 'g-bar', tabindex: 0, role: 'button', 'aria-label': label, 'data-card': x.card.id, 'data-move': m,
+        onclick: open, onpointerenter: gpopHover, onpointerleave: gpopLeave,
+        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } } },
+        s('title', {}, label),
+        s('rect', { class: 'g-hit', x: xc(i) - Math.max(bw, 24) / 2, y: yTop + 18, width: Math.max(bw, 24), height: BAR_H }),
+        s('rect', { class: 'g-barfill', x: xc(i) - bw / 2, y: base - bh, width: bw, height: bh, fill: th.color }),
+        x.card.big && s('text', { class: 'g-barstar', x: xc(i), y: base - bh - 3, 'text-anchor': 'middle' }, '★')));
+    });
+  }
   return svg;
 }
 
@@ -2253,7 +2333,17 @@ function renderGraph() {
       dataset: { char: p.id }, onclick: () => { ui.graphOn[p.id] = !on; renderMain(); } },
       personMark(p, 12), h('span', {}, p.name || '（名前なし）'), !has && h('small', {}, '値なし'));
   }));
+  const th = graphThreadSel();
+  const threadChips = work.threads.length > 0 && h('div', { class: 'gchips gthreads', role: 'group', 'aria-label': '筋' },
+    h('button', { type: 'button', class: 'gchip gthread' + (th ? '' : ' on'), 'aria-pressed': th ? 'false' : 'true', dataset: { thread: '' },
+      onclick: () => { ui.graphThread = null; renderMain(); } }, h('span', {}, 'すべて')),
+    work.threads.map((t) => {
+      const on = !!th && th.id === t.id;
+      return h('button', { type: 'button', class: 'gchip gthread' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', dataset: { thread: t.id },
+        onclick: () => { ui.graphThread = t.id; renderMain(); } }, threadMark(t), h('span', {}, t.name || '（名前なし）'));
+    }));
   return h('div', { class: 'page graph' },
+    threadChips,
     chips,
     h('div', { class: 'gchart-wrap' }, renderGraphChart(work.characters, cards, nums)),
     h('p', { class: 'legend' }, '灰色＝だれの状態も入っていないカード'));
