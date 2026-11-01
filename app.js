@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-11-01a';
+const APP_BUILD = '2026-11-01b';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -2026,7 +2026,7 @@ function renderPeopleTable() {
   const head2 = h('tr', {}, groups.flatMap((g, gi) => g.cols.map((col, ci) => {
     const cls = (ci === 0 && gi > 0 ? ' bs' : '');
     return col.brk
-      ? h('th', { class: 'brk' + cls, title: '休憩' })
+      ? h('th', { class: 'brk' + cls }, '休憩')
       : h('th', { class: 'ch' + cls }, `#${nums.get(col.card.id)}`);
   })));
 
@@ -2081,7 +2081,7 @@ function kobanPages() {
 function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   const { flat, rh, top, h1, h2 } = L;
   const nums = numbering();
-  const INK = '#2d2822', MUTED = '#6e6455', LINE = '#d9d1c1', HEAD = '#f2eee5';
+  const INK = '#2d2822', MUTED = '#6e6455', LINE = '#d9d1c1', HEAD = '#f2eee5', SUNK = '#e9e3d6', RULE = '#b7ac97';
   const FONT = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif';
   const pt = (n) => n * 0.3528 * k; // ポイント → 絵の点
   const X = (mm) => mm * k;
@@ -2106,7 +2106,7 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   font(11, false); ctx.fillText('　香盤表', X(m) + tw, X(m + 4));
 
   // 列の幅
-  const NAME = 34, BRK = 1.6;
+  const NAME = 34, BRK = 7;
   const nBrk = flat.filter((f) => f.col.brk).length;
   const nCard = flat.length - nBrk;
   const cw = (PDF_PAGE.w - m * 2 - NAME - nBrk * BRK) / Math.max(1, nCard);
@@ -2139,6 +2139,14 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
     ctx.fillText(cw >= 5.5 ? `#${n}` : String(n), X(xs[i] + cw / 2), X(top + h1 + h2 / 2));
   });
 
+  // 休憩の列：沈んだ地の色と「休憩」の見出し
+  flat.forEach((f, i) => {
+    if (!f.col.brk) return;
+    ctx.fillStyle = SUNK; ctx.fillRect(X(xs[i]), X(top + h1), X(BRK), X(bottom - top - h1));
+    font(Math.min(8, BRK / 0.3528 / 2.4), true); ctx.fillStyle = INK; ctx.textAlign = 'center';
+    ctx.fillText('休憩', X(xs[i] + BRK / 2), X(top + h1 + h2 / 2));
+  });
+
   // 罫線
   ctx.strokeStyle = LINE; ctx.lineWidth = X(0.25);
   ctx.beginPath();
@@ -2146,7 +2154,7 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   ctx.moveTo(X(m), X(top)); ctx.lineTo(X(right), X(top));
   ctx.moveTo(X(m + NAME), X(top + h1)); ctx.lineTo(X(right), X(top + h1));
   [m, m + NAME, right].forEach((xx) => { ctx.moveTo(X(xx), X(top)); ctx.lineTo(X(xx), X(bottom)); });
-  flat.forEach((f, i) => { if (!f.col.brk && !f.bs) { ctx.moveTo(X(xs[i]), X(top + h1)); ctx.lineTo(X(xs[i]), X(bottom)); } });
+  flat.forEach((f, i) => { if (!f.bs) { ctx.moveTo(X(xs[i]), X(top + h1)); ctx.lineTo(X(xs[i]), X(bottom)); } });
   ctx.stroke();
   // 人物の行
   rowsChars.forEach((p, r) => {
@@ -2192,12 +2200,9 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
     });
   });
 
-  // 休憩の列とブロックの区切り
-  ctx.fillStyle = INK;
-  flat.forEach((f, i) => {
-    if (f.col.brk) ctx.fillRect(X(xs[i]), X(top + h1), X(BRK), X(bottom - top - h1));
-    if (f.bs) ctx.fillRect(X(xs[i] - 0.4), X(top), X(0.8), X(bottom - top));
-  });
+  // ブロックの区切り：罫線より一段濃いだけの細い線
+  ctx.fillStyle = RULE;
+  flat.forEach((f, i) => { if (f.bs) ctx.fillRect(X(xs[i] - 0.25), X(top), X(0.5), X(bottom - top)); });
 
   // 下の端：日付と頁
   const d = new Date();

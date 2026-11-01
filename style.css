@@ -333,7 +333,8 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .ptable-wrap { overflow: auto; width: fit-content; max-width: 100%; max-height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); -webkit-overflow-scrolling: touch; }
 .ptable { border-collapse: separate; border-spacing: 0; font-size: 13px; }
 .ptable th, .ptable td { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 0; text-align: center; font-weight: 400; }
-.ptable .bs { border-left: 3px solid var(--ink); }
+/* ブロックの区切り：罫線より一段濃いだけの細い線（目立たせすぎない） */
+.ptable .bs { border-left: 2px solid #b7ac97; }
 .ptable thead th { position: sticky; background: var(--bg); z-index: 1; }
 .ptable thead tr:first-child th { top: 0; padding: 4px 6px; font-weight: 700; white-space: nowrap; text-align: left; }
 .ptable thead tr:nth-child(2) th { top: 29px; min-width: 36px; padding: 2px 0; font-size: 13px; color: var(--muted); }
@@ -360,7 +361,9 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .people-tools { display: flex; justify-content: flex-end; margin-bottom: 6px; }
 .pdf-btn { min-height: 32px; padding: 4px 14px; font-size: 14px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
 .print-title { display: none; }
-.ptable .brk, .ptable thead tr:nth-child(2) th.brk, .ptable td.brk { min-width: 5px; width: 5px; max-width: 5px; padding: 0; background: var(--ink); }
+/* 休憩の列：沈んだ地の色の列と「休憩」の見出しで、位置をぱっと見で分かるようにする */
+.ptable .brk, .ptable thead tr:nth-child(2) th.brk, .ptable td.brk { min-width: 40px; width: 40px; max-width: 40px; padding: 0; background: var(--sunk); }
+.ptable thead tr:nth-child(2) th.brk { color: var(--ink); font-weight: 700; }
 .people-links .to-graph { border: 1px solid var(--line); background: var(--paper); color: var(--ink); min-height: 32px; padding: 4px 14px; font-size: 14px; }
 
 /* ---------- カード詳細：人物・筋のチップ、状態 ---------- */
@@ -743,7 +746,7 @@ button.memo-remove { background: none; border: none; box-shadow: none; padding: 
   .ptable-wrap { overflow: visible; width: 100%; max-width: none; max-height: none; border: none; border-radius: 0; background: none; }
   .ptable { table-layout: fixed; width: 100%; font-size: 9pt; }
   .ptable .c-name { width: 26mm; }
-  .ptable .c-brk { width: 2mm; }
+  .ptable .c-brk { width: 7mm; }
   .ptable thead th, .ptable .corner, .ptable .rname { position: static; }
   .ptable thead tr:first-child th { font-size: 9pt; padding: 2px 4px; overflow: hidden; }
   .ptable thead tr:nth-child(2) th { min-width: 0; font-size: 9pt; overflow: hidden; }
