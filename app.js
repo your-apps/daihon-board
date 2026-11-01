@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-11-01b';
+const APP_BUILD = '2026-11-01c';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -1999,40 +1999,50 @@ function entitySection(kind, title, addLabel, promptText) {
 }
 
 // 人物の行の表示：行＝人物、列＝カード（ボードの順）
-// 香盤表の列（画面の表と PDF で共通）。休憩は、そのブロックの index 枚目の前。
-// flat は列の並び（bs＝ブロックの始まり。最初のブロックは除く）
+// 香盤表の列（画面の表と PDF で共通）。休憩は、そのブロックの index 枚目の前に入る、ブロックの外の独立した列。
+// flat は列の並び（bs＝前の列と別のブロックのカードの始まり。休憩の直後は除く）。
+// segments は見出しの1段目の区切り（ブロックの続き、または休憩の列）。
 function peopleColumns() {
   const im = intermissionOf(work);
-  const groups = work.blocks.map((b) => {
-    const cols = [];
+  const flat = [];
+  work.blocks.forEach((b) => {
     const imIndex = im && im.blockId === b.id ? Math.min(im.index, b.cards.length) : -1;
     b.cards.forEach((c, i) => {
-      if (i === imIndex) cols.push({ brk: true });
-      cols.push({ card: c });
+      if (i === imIndex) flat.push({ col: { brk: true } });
+      flat.push({ col: { card: c }, block: b });
     });
-    if (imIndex === b.cards.length) cols.push({ brk: true });
-    return { block: b, cols };
-  }).filter((g) => g.cols.length);
-  const flat = groups.flatMap((g, gi) => g.cols.map((col, ci) => ({ col, bs: ci === 0 && gi > 0, block: g.block })));
-  return { groups, flat };
+    if (imIndex === b.cards.length) flat.push({ col: { brk: true } });
+  });
+  flat.forEach((f, i) => {
+    const prev = flat[i - 1];
+    f.bs = !f.col.brk && !!prev && !prev.col.brk && prev.block !== f.block;
+  });
+  const segments = [];
+  flat.forEach((f, i) => {
+    const last = segments[segments.length - 1];
+    if (f.col.brk) segments.push({ brk: true, start: i, end: i + 1 });
+    else if (last && !last.brk && last.block === f.block) last.end = i + 1;
+    else segments.push({ block: f.block, start: i, end: i + 1 });
+  });
+  return { flat, segments };
 }
 
 function renderPeopleTable() {
   const nums = numbering();
-  const { groups, flat } = peopleColumns();
+  const { flat, segments } = peopleColumns();
 
+  // 休憩の列は見出しの2段と本文をそれぞれ1つのセルにし、同じ帯の色で上から下までつなげる
   const head1 = h('tr', {}, h('th', { class: 'corner', rowspan: 2 }, '人物'),
-    groups.map((g, gi) => h('th', { class: 'bh' + (gi > 0 ? ' bs' : ''), colspan: g.cols.length }, g.block.name)));
-  const head2 = h('tr', {}, groups.flatMap((g, gi) => g.cols.map((col, ci) => {
-    const cls = (ci === 0 && gi > 0 ? ' bs' : '');
-    return col.brk
-      ? h('th', { class: 'brk' + cls }, '休憩')
-      : h('th', { class: 'ch' + cls }, `#${nums.get(col.card.id)}`);
-  })));
+    segments.map((sg) => sg.brk
+      ? h('th', { class: 'brk', rowspan: 2, 'aria-hidden': 'true' })
+      : h('th', { class: 'bh' + (flat[sg.start].bs ? ' bs' : ''), colspan: sg.end - sg.start }, sg.block.name)));
+  const head2 = h('tr', {}, flat.filter((f) => !f.col.brk).map((f) =>
+    h('th', { class: 'ch' + (f.bs ? ' bs' : '') }, `#${nums.get(f.col.card.id)}`)));
 
   // 香盤表：列の並び（休憩で区切る）。続けて出ている間を1本の帯にする
   const colgroup = h('colgroup', {}, h('col', { class: 'c-name' }), flat.map((f) => h('col', { class: f.col.brk ? 'c-brk' : 'c-card' })));
-  const rows = work.characters.map((p) => {
+  const nRows = work.characters.length;
+  const rows = work.characters.map((p, r) => {
     const count = allCards().filter((x) => x.card.characters.includes(p.id)).length;
     const onAt = (k) => !!(flat[k] && !flat[k].col.brk && flat[k].col.card.characters.includes(p.id));
     return h('tr', {},
@@ -2042,7 +2052,7 @@ function renderPeopleTable() {
         h('span', { class: 'cnt' }, `${count}枚`)),
       flat.map((f, k) => {
         const bs = f.bs ? ' bs' : '';
-        if (f.col.brk) return h('td', { class: 'brk' + bs });
+        if (f.col.brk) return r === 0 ? h('td', { class: 'brk', rowspan: nRows }, h('span', { class: 'brk-label', 'aria-label': '休憩' }, '休', h('br'), '憩')) : null;
         const c = f.col.card;
         const on = onAt(k);
         const v = on ? c.states[p.id] : undefined;
@@ -2066,7 +2076,7 @@ const PDF_PAGE = { w: 297, h: 210, m: 10 }; // mm
 const PDF_DPI = 200;
 
 function kobanPages() {
-  const { flat } = peopleColumns();
+  const { flat, segments } = peopleColumns();
   const chars = work.characters;
   const top = PDF_PAGE.m + 11, h1 = 7, h2 = 6, foot = 6;
   const avail = PDF_PAGE.h - PDF_PAGE.m - foot - top - h1 - h2;
@@ -2075,11 +2085,11 @@ function kobanPages() {
   if (rh < 7) { rh = 7; per = Math.floor(avail / rh); }
   const pages = [];
   for (let i = 0; i < Math.max(1, chars.length); i += per) pages.push(chars.slice(i, i + per));
-  return { flat, pages, rh, top, h1, h2 };
+  return { flat, segments, pages, rh, top, h1, h2 };
 }
 
 function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
-  const { flat, rh, top, h1, h2 } = L;
+  const { flat, segments, rh, top, h1, h2 } = L;
   const nums = numbering();
   const INK = '#2d2822', MUTED = '#6e6455', LINE = '#d9d1c1', HEAD = '#f2eee5', SUNK = '#e9e3d6', RULE = '#b7ac97';
   const FONT = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif';
@@ -2120,31 +2130,19 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   ctx.fillStyle = HEAD; ctx.fillRect(X(m), X(top), X(right - m), X(h1 + h2));
   ctx.fillStyle = INK; font(9, true); ctx.textAlign = 'left';
   ctx.fillText('人物', X(m + 2), X(top + (h1 + h2) / 2));
-  let gStart = 0;
-  for (let i = 0; i <= flat.length; i++) {
-    if (i === flat.length || (i > 0 && flat[i].bs)) {
-      const name = flat[gStart].block ? flat[gStart].block.name : '';
-      const x0 = xs[gStart], x1 = i === flat.length ? right : xs[i];
-      ctx.save(); ctx.beginPath(); ctx.rect(X(x0), X(top), X(x1 - x0), X(h1)); ctx.clip();
-      ctx.fillStyle = INK; font(9, true); ctx.fillText(name || '', X(x0 + 1.5), X(top + h1 / 2));
-      ctx.restore();
-      gStart = i;
-    }
-  }
+  segments.forEach((sg) => {
+    if (sg.brk) return;
+    const x0 = xs[sg.start], x1 = sg.end === flat.length ? right : xs[sg.end];
+    ctx.save(); ctx.beginPath(); ctx.rect(X(x0), X(top), X(x1 - x0), X(h1)); ctx.clip();
+    ctx.fillStyle = INK; font(9, true); ctx.fillText(sg.block.name || '', X(x0 + 1.5), X(top + h1 / 2));
+    ctx.restore();
+  });
   const numSize = Math.min(8, cw / 0.3528 / 2.2);
   flat.forEach((f, i) => {
     if (f.col.brk) return;
     const n = nums.get(f.col.card.id);
     font(numSize, false); ctx.fillStyle = MUTED; ctx.textAlign = 'center';
     ctx.fillText(cw >= 5.5 ? `#${n}` : String(n), X(xs[i] + cw / 2), X(top + h1 + h2 / 2));
-  });
-
-  // 休憩の列：沈んだ地の色と「休憩」の見出し
-  flat.forEach((f, i) => {
-    if (!f.col.brk) return;
-    ctx.fillStyle = SUNK; ctx.fillRect(X(xs[i]), X(top + h1), X(BRK), X(bottom - top - h1));
-    font(Math.min(8, BRK / 0.3528 / 2.4), true); ctx.fillStyle = INK; ctx.textAlign = 'center';
-    ctx.fillText('休憩', X(xs[i] + BRK / 2), X(top + h1 + h2 / 2));
   });
 
   // 罫線
@@ -2156,6 +2154,16 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   [m, m + NAME, right].forEach((xx) => { ctx.moveTo(X(xx), X(top)); ctx.lineTo(X(xx), X(bottom)); });
   flat.forEach((f, i) => { if (!f.bs) { ctx.moveTo(X(xs[i]), X(top + h1)); ctx.lineTo(X(xs[i]), X(bottom)); } });
   ctx.stroke();
+  // 休憩の列：罫線を消し、上から下まで細い帯を1本通して、真ん中に縦書きの「休憩」
+  flat.forEach((f, i) => {
+    if (!f.col.brk) return;
+    ctx.fillStyle = '#fff'; ctx.fillRect(X(xs[i] + 0.15), X(top), X(BRK - 0.3), X(bottom - top));
+    ctx.fillStyle = SUNK; ctx.beginPath(); ctx.roundRect(X(xs[i] + 1.3), X(top + 0.6), X(BRK - 2.6), X(bottom - top - 1.2), X(1.2)); ctx.fill();
+    font(9, true); ctx.fillStyle = MUTED; ctx.textAlign = 'center';
+    const cyb = top + (bottom - top) / 2;
+    ctx.fillText('休', X(xs[i] + BRK / 2), X(cyb - 2.2));
+    ctx.fillText('憩', X(xs[i] + BRK / 2), X(cyb + 2.2));
+  });
   // 人物の行
   rowsChars.forEach((p, r) => {
     const y = rowsTop + r * rh;

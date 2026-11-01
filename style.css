@@ -361,9 +361,15 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .people-tools { display: flex; justify-content: flex-end; margin-bottom: 6px; }
 .pdf-btn { min-height: 32px; padding: 4px 14px; font-size: 14px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
 .print-title { display: none; }
-/* 休憩の列：沈んだ地の色の列と「休憩」の見出しで、位置をぱっと見で分かるようにする */
-.ptable .brk, .ptable thead tr:nth-child(2) th.brk, .ptable td.brk { min-width: 40px; width: 40px; max-width: 40px; padding: 0; background: var(--sunk); }
-.ptable thead tr:nth-child(2) th.brk { color: var(--ink); font-weight: 700; }
+/* 休憩の列：ブロックの外の独立した列。見出しから下まで細い帯を1本通し、縦書きの「休憩」を添える。
+   広い空のセルに見えないよう、帯は列の幅より細くして両脇に地の色を残す（仕切りに見せる） */
+.ptable th.brk, .ptable td.brk { width: 32px; min-width: 32px; max-width: 32px; padding: 0; border-bottom: none;
+  background: linear-gradient(var(--sunk), var(--sunk)) center / 18px 100% no-repeat, var(--paper); }
+.ptable thead th.brk { background: linear-gradient(var(--sunk), var(--sunk)) center / 18px 100% no-repeat, var(--bg); }
+.ptable td.brk { vertical-align: top; }
+.ptable thead tr:first-child th.brk { padding: 0; }
+.ptable .brk-label { display: block; position: sticky; top: 62px; margin: 10px auto; text-align: center;
+  font-size: 13px; font-weight: 700; line-height: 1.4; color: var(--muted); }
 .people-links .to-graph { border: 1px solid var(--line); background: var(--paper); color: var(--ink); min-height: 32px; padding: 4px 14px; font-size: 14px; }
 
 /* ---------- カード詳細：人物・筋のチップ、状態 ---------- */
