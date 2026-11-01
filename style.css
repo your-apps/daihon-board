@@ -337,7 +337,7 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .ptable .bs { border-left: 2px solid #b7ac97; }
 .ptable thead th { position: sticky; background: var(--bg); z-index: 1; }
 .ptable thead tr:first-child th { top: 0; padding: 4px 6px; font-weight: 700; white-space: nowrap; text-align: left; }
-.ptable thead tr:nth-child(2) th { top: 29px; min-width: 36px; padding: 2px 0; font-size: 13px; color: var(--muted); }
+.ptable thead tr:nth-child(2) th { top: var(--ph1, 29px); min-width: 36px; padding: 2px 0; font-size: 13px; color: var(--muted); }
 .ptable .corner, .ptable .rname { position: sticky; left: 0; z-index: 2; background: var(--paper); text-align: left; min-width: 150px; max-width: 220px; white-space: nowrap; }
 .ptable thead .corner { z-index: 3; background: var(--bg); padding: 4px 8px; }
 .ptable .rname { display: table-cell; padding: 6px 8px; font-weight: 700; }

@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-11-01d';
+const APP_BUILD = '2026-11-01e';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -2064,8 +2064,14 @@ function renderPeopleTable() {
       }));
   });
 
-  return h('div', { class: 'ptable-wrap' },
-    h('table', { class: 'ptable' }, colgroup, h('thead', {}, head1, head2), h('tbody', {}, rows)));
+  // 見出しの2段目が貼り付く位置＝1段目の実際の高さ。文字の高さはブラウザで違う（Safari は低い）ので、
+  // 数字で決めると2段目だけが下へずれて本文の線にかぶる。描いたあとに測って合わせる
+  const table = h('table', { class: 'ptable' }, colgroup, h('thead', {}, head1, head2), h('tbody', {}, rows));
+  requestAnimationFrame(() => {
+    const hgt = head1.getBoundingClientRect().height;
+    if (hgt > 0) table.style.setProperty('--ph1', `${hgt}px`);
+  });
+  return h('div', { class: 'ptable-wrap' }, table);
 }
 
 // ---------- 香盤表の PDF（コンビニ印刷用。A4 横） ----------
