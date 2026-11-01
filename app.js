@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-11-01c';
+const APP_BUILD = '2026-11-01d';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -2157,7 +2157,8 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   // 休憩の列：罫線を消し、上から下まで細い帯を1本通して、真ん中に縦書きの「休憩」
   flat.forEach((f, i) => {
     if (!f.col.brk) return;
-    ctx.fillStyle = '#fff'; ctx.fillRect(X(xs[i] + 0.15), X(top), X(BRK - 0.3), X(bottom - top));
+    ctx.fillStyle = '#fff'; ctx.fillRect(X(xs[i] + 0.15), X(top + 0.2), X(BRK - 0.3), X(bottom - top - 0.4)); // 表の上下の線は残す
+    ctx.fillStyle = HEAD; ctx.fillRect(X(xs[i] + 0.15), X(top + 0.2), X(BRK - 0.3), X(h1 + h2 - 0.2)); // 見出しの段は画面と同じ地の色
     ctx.fillStyle = SUNK; ctx.beginPath(); ctx.roundRect(X(xs[i] + 1.3), X(top + 0.6), X(BRK - 2.6), X(bottom - top - 1.2), X(1.2)); ctx.fill();
     font(9, true); ctx.fillStyle = MUTED; ctx.textAlign = 'center';
     const cyb = top + (bottom - top) / 2;

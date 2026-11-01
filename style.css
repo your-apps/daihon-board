@@ -366,7 +366,7 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .ptable th.brk, .ptable td.brk { width: 32px; min-width: 32px; max-width: 32px; padding: 0; border-bottom: none;
   background: linear-gradient(var(--sunk), var(--sunk)) center / 18px 100% no-repeat, var(--paper); }
 .ptable thead th.brk { background: linear-gradient(var(--sunk), var(--sunk)) center / 18px 100% no-repeat, var(--bg); }
-.ptable td.brk { vertical-align: top; }
+.ptable td.brk { vertical-align: top; border-bottom: 1px solid var(--line); } /* 表の一番下の線は閉じる */
 .ptable thead tr:first-child th.brk { padding: 0; }
 .ptable .brk-label { display: block; position: sticky; top: 62px; margin: 10px auto; text-align: center;
   font-size: 13px; font-weight: 700; line-height: 1.4; color: var(--muted); }
