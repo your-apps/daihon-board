@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-11-01e';
+const APP_BUILD = '2026-11-01f';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）

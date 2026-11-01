@@ -362,10 +362,11 @@ details.more > summary { cursor: pointer; font-size: 14px; font-weight: 700; col
 .pdf-btn { min-height: 32px; padding: 4px 14px; font-size: 14px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
 .print-title { display: none; }
 /* 休憩の列：ブロックの外の独立した列。見出しから下まで細い帯を1本通し、縦書きの「休憩」を添える。
-   広い空のセルに見えないよう、帯は列の幅より細くして両脇に地の色を残す（仕切りに見せる） */
+   広い空のセルに見えないよう、帯は列の幅より細くして両脇に地の色を残す（仕切りに見せる）。
+   帯の位置は整数の px で決める（center だと 6.5px になり、Safari で見出しと本文の帯が 1px ずれた） */
 .ptable th.brk, .ptable td.brk { width: 32px; min-width: 32px; max-width: 32px; padding: 0; border-bottom: none;
-  background: linear-gradient(var(--sunk), var(--sunk)) center / 18px 100% no-repeat, var(--paper); }
-.ptable thead th.brk { background: linear-gradient(var(--sunk), var(--sunk)) center / 18px 100% no-repeat, var(--bg); }
+  background: linear-gradient(var(--sunk), var(--sunk)) 6px 0 / 19px 100% no-repeat, var(--paper); }
+.ptable thead th.brk { background: linear-gradient(var(--sunk), var(--sunk)) 6px 0 / 19px 100% no-repeat, var(--bg); }
 .ptable td.brk { vertical-align: top; border-bottom: 1px solid var(--line); } /* 表の一番下の線は閉じる */
 .ptable thead tr:first-child th.brk { padding: 0; }
 .ptable .brk-label { display: block; position: sticky; top: 62px; margin: 10px auto; text-align: center;
