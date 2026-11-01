@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-10-31j';
+const APP_BUILD = '2026-11-01a';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -1999,10 +1999,10 @@ function entitySection(kind, title, addLabel, promptText) {
 }
 
 // 人物の行の表示：行＝人物、列＝カード（ボードの順）
-function renderPeopleTable() {
-  const nums = numbering();
+// 香盤表の列（画面の表と PDF で共通）。休憩は、そのブロックの index 枚目の前。
+// flat は列の並び（bs＝ブロックの始まり。最初のブロックは除く）
+function peopleColumns() {
   const im = intermissionOf(work);
-  // 列を作る。休憩は、そのブロックの index 枚目の前
   const groups = work.blocks.map((b) => {
     const cols = [];
     const imIndex = im && im.blockId === b.id ? Math.min(im.index, b.cards.length) : -1;
@@ -2013,6 +2013,13 @@ function renderPeopleTable() {
     if (imIndex === b.cards.length) cols.push({ brk: true });
     return { block: b, cols };
   }).filter((g) => g.cols.length);
+  const flat = groups.flatMap((g, gi) => g.cols.map((col, ci) => ({ col, bs: ci === 0 && gi > 0, block: g.block })));
+  return { groups, flat };
+}
+
+function renderPeopleTable() {
+  const nums = numbering();
+  const { groups, flat } = peopleColumns();
 
   const head1 = h('tr', {}, h('th', { class: 'corner', rowspan: 2 }, '人物'),
     groups.map((g, gi) => h('th', { class: 'bh' + (gi > 0 ? ' bs' : ''), colspan: g.cols.length }, g.block.name)));
@@ -2024,7 +2031,6 @@ function renderPeopleTable() {
   })));
 
   // 香盤表：列の並び（休憩で区切る）。続けて出ている間を1本の帯にする
-  const flat = groups.flatMap((g, gi) => g.cols.map((col, ci) => ({ col, bs: ci === 0 && gi > 0 })));
   const colgroup = h('colgroup', {}, h('col', { class: 'c-name' }), flat.map((f) => h('col', { class: f.col.brk ? 'c-brk' : 'c-card' })));
   const rows = work.characters.map((p) => {
     const count = allCards().filter((x) => x.card.characters.includes(p.id)).length;
@@ -2052,9 +2058,223 @@ function renderPeopleTable() {
     h('table', { class: 'ptable' }, colgroup, h('thead', {}, head1, head2), h('tbody', {}, rows)));
 }
 
-// 印刷：呼ぶだけ。枠の中などで印刷できない環境では、例外が出たときだけ知らせる
-function printKoban() {
-  try { window.print(); } catch (err) { showToast('この画面では印刷できません'); }
+// ---------- 香盤表の PDF（コンビニ印刷用。A4 横） ----------
+// 外の部品は使わず、端末の中で表を絵（JPEG）に描き、その絵を貼った PDF を組む。
+// できたファイルは端末に保存するだけで、ほかへは送らない。書き出しと同じく、毎回日時入りの新しい名前にする。
+
+const PDF_PAGE = { w: 297, h: 210, m: 10 }; // mm
+const PDF_DPI = 200;
+
+function kobanPages() {
+  const { flat } = peopleColumns();
+  const chars = work.characters;
+  const top = PDF_PAGE.m + 11, h1 = 7, h2 = 6, foot = 6;
+  const avail = PDF_PAGE.h - PDF_PAGE.m - foot - top - h1 - h2;
+  let rh = Math.min(10, avail / Math.max(1, chars.length));
+  let per = chars.length || 1;
+  if (rh < 7) { rh = 7; per = Math.floor(avail / rh); }
+  const pages = [];
+  for (let i = 0; i < Math.max(1, chars.length); i += per) pages.push(chars.slice(i, i + per));
+  return { flat, pages, rh, top, h1, h2 };
+}
+
+function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
+  const { flat, rh, top, h1, h2 } = L;
+  const nums = numbering();
+  const INK = '#2d2822', MUTED = '#6e6455', LINE = '#d9d1c1', HEAD = '#f2eee5';
+  const FONT = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif';
+  const pt = (n) => n * 0.3528 * k; // ポイント → 絵の点
+  const X = (mm) => mm * k;
+  const font = (size, bold) => { ctx.font = `${bold ? '700 ' : ''}${pt(size)}px ${FONT}`; };
+  const fit = (text, maxW) => {
+    let t = String(text);
+    if (ctx.measureText(t).width <= maxW) return t;
+    while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+    return t + '…';
+  };
+
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, X(PDF_PAGE.w), X(PDF_PAGE.h));
+  ctx.textBaseline = 'middle';
+
+  // 見出し：作品名・香盤表
+  const m = PDF_PAGE.m;
+  ctx.fillStyle = INK; font(14, true); ctx.textAlign = 'left';
+  const title = fit(work.title || '無題', X(PDF_PAGE.w - m * 2 - 40));
+  ctx.fillText(title, X(m), X(m + 4));
+  const tw = ctx.measureText(title).width;
+  font(11, false); ctx.fillText('　香盤表', X(m) + tw, X(m + 4));
+
+  // 列の幅
+  const NAME = 34, BRK = 1.6;
+  const nBrk = flat.filter((f) => f.col.brk).length;
+  const nCard = flat.length - nBrk;
+  const cw = (PDF_PAGE.w - m * 2 - NAME - nBrk * BRK) / Math.max(1, nCard);
+  const xs = []; let x = m + NAME;
+  flat.forEach((f) => { xs.push(x); x += f.col.brk ? BRK : cw; });
+  const right = x;
+  const rowsTop = top + h1 + h2;
+  const bottom = rowsTop + rh * rowsChars.length;
+
+  // 見出しの段（ブロック名・カードの番号）
+  ctx.fillStyle = HEAD; ctx.fillRect(X(m), X(top), X(right - m), X(h1 + h2));
+  ctx.fillStyle = INK; font(9, true); ctx.textAlign = 'left';
+  ctx.fillText('人物', X(m + 2), X(top + (h1 + h2) / 2));
+  let gStart = 0;
+  for (let i = 0; i <= flat.length; i++) {
+    if (i === flat.length || (i > 0 && flat[i].bs)) {
+      const name = flat[gStart].block ? flat[gStart].block.name : '';
+      const x0 = xs[gStart], x1 = i === flat.length ? right : xs[i];
+      ctx.save(); ctx.beginPath(); ctx.rect(X(x0), X(top), X(x1 - x0), X(h1)); ctx.clip();
+      ctx.fillStyle = INK; font(9, true); ctx.fillText(name || '', X(x0 + 1.5), X(top + h1 / 2));
+      ctx.restore();
+      gStart = i;
+    }
+  }
+  const numSize = Math.min(8, cw / 0.3528 / 2.2);
+  flat.forEach((f, i) => {
+    if (f.col.brk) return;
+    const n = nums.get(f.col.card.id);
+    font(numSize, false); ctx.fillStyle = MUTED; ctx.textAlign = 'center';
+    ctx.fillText(cw >= 5.5 ? `#${n}` : String(n), X(xs[i] + cw / 2), X(top + h1 + h2 / 2));
+  });
+
+  // 罫線
+  ctx.strokeStyle = LINE; ctx.lineWidth = X(0.25);
+  ctx.beginPath();
+  for (let r = 0; r <= rowsChars.length; r++) { const y = rowsTop + r * rh; ctx.moveTo(X(m), X(y)); ctx.lineTo(X(right), X(y)); }
+  ctx.moveTo(X(m), X(top)); ctx.lineTo(X(right), X(top));
+  ctx.moveTo(X(m + NAME), X(top + h1)); ctx.lineTo(X(right), X(top + h1));
+  [m, m + NAME, right].forEach((xx) => { ctx.moveTo(X(xx), X(top)); ctx.lineTo(X(xx), X(bottom)); });
+  flat.forEach((f, i) => { if (!f.col.brk && !f.bs) { ctx.moveTo(X(xs[i]), X(top + h1)); ctx.lineTo(X(xs[i]), X(bottom)); } });
+  ctx.stroke();
+  // 人物の行
+  rowsChars.forEach((p, r) => {
+    const y = rowsTop + r * rh;
+    const cy = y + rh / 2;
+    // 印・名前・枚数
+    ctx.save();
+    ctx.translate(X(m + 1.5), X(cy - 1.5)); ctx.scale(X(3) / 12, X(3) / 12);
+    ctx.fillStyle = p.color;
+    const shapes = { square: 'M2 2H10V10H2Z', triangle: 'M6 1.5L11 10.5H1Z', diamond: 'M6 0.8L11.2 6L6 11.2L0.8 6Z',
+      down: 'M1 1.5H11L6 10.5Z', cross: 'M4.2 1H7.8V4.2H11V7.8H7.8V11H4.2V7.8H1V4.2H4.2Z' };
+    if (shapes[p.shape]) ctx.fill(new Path2D(shapes[p.shape]));
+    else { ctx.beginPath(); ctx.arc(6, 6, 5, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+    const count = allCards().filter((xx) => xx.card.characters.includes(p.id)).length;
+    font(7.5, false); ctx.fillStyle = MUTED; ctx.textAlign = 'right';
+    const cnt = `${count}枚`;
+    ctx.fillText(cnt, X(m + NAME - 1.5), X(cy));
+    const cntW = ctx.measureText(cnt).width;
+    font(9, true); ctx.fillStyle = INK; ctx.textAlign = 'left';
+    ctx.fillText(fit(p.name || '（名前なし）', X(NAME - 5.5 - 2.5) - cntW), X(m + 5.5), X(cy));
+
+    // 出ている間の帯（休憩とブロックの区切りで切る）
+    const onAt = (i) => !!(flat[i] && !flat[i].col.brk && flat[i].col.card.characters.includes(p.id));
+    for (let i = 0; i < flat.length; i++) {
+      if (!onAt(i) || onAt(i - 1)) continue;
+      let j = i; while (onAt(j + 1)) j++;
+      const x0 = xs[i] + 0.6, x1 = xs[j] + cw - 0.6;
+      ctx.beginPath(); ctx.roundRect(X(x0), X(y + 1.2), X(x1 - x0), X(rh - 2.4), X(1.4));
+      ctx.fillStyle = '#fff'; ctx.fill(); // 下の罫線を消してから色を重ねる
+      ctx.globalAlpha = 0.24; ctx.fillStyle = p.color; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.lineWidth = X(0.45); ctx.strokeStyle = p.color; ctx.stroke();
+      i = j;
+    }
+    // 状態の値
+    const vSize = Math.min(9, cw / 0.3528 / 2);
+    flat.forEach((f, i) => {
+      if (!onAt(i)) return;
+      const v = f.col.card.states[p.id];
+      if (v === undefined) return;
+      font(vSize, true); ctx.fillStyle = INK; ctx.textAlign = 'center';
+      ctx.fillText(fmtState(v), X(xs[i] + cw / 2), X(cy));
+    });
+  });
+
+  // 休憩の列とブロックの区切り
+  ctx.fillStyle = INK;
+  flat.forEach((f, i) => {
+    if (f.col.brk) ctx.fillRect(X(xs[i]), X(top + h1), X(BRK), X(bottom - top - h1));
+    if (f.bs) ctx.fillRect(X(xs[i] - 0.4), X(top), X(0.8), X(bottom - top));
+  });
+
+  // 下の端：日付と頁
+  const d = new Date();
+  font(7.5, false); ctx.fillStyle = MUTED; ctx.textAlign = 'right';
+  ctx.fillText(`${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}` + (pageCount > 1 ? `　${pageNo}/${pageCount}` : ''),
+    X(PDF_PAGE.w - m), X(PDF_PAGE.h - m));
+}
+
+// JPEG の絵を1頁に1枚ずつ貼った PDF を組む
+function buildImagePdf(images, wPt, hPt) {
+  const enc = new TextEncoder();
+  const parts = []; const offs = []; let len = 0;
+  const push = (x) => { const b = typeof x === 'string' ? enc.encode(x) : x; parts.push(b); len += b.length; };
+  const obj = (n, ...body) => { offs[n] = len; push(`${n} 0 obj\n`); body.forEach(push); push('\nendobj\n'); };
+  push('%PDF-1.4\n%âãÏÓ\n');
+  const n = images.length;
+  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2, `<< /Type /Pages /Kids [${images.map((_, i) => `${3 + i * 3} 0 R`).join(' ')}] /Count ${n} >>`);
+  images.forEach((im, i) => {
+    const pg = 3 + i * 3, ct = pg + 1, ig = pg + 2;
+    obj(pg, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${wPt} ${hPt}] /Resources << /XObject << /Im0 ${ig} 0 R >> >> /Contents ${ct} 0 R >>`);
+    const c = `q ${wPt} 0 0 ${hPt} 0 0 cm /Im0 Do Q`;
+    obj(ct, `<< /Length ${c.length} >>\nstream\n`, c, '\nendstream');
+    obj(ig, `<< /Type /XObject /Subtype /Image /Width ${im.w} /Height ${im.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${im.bytes.length} >>\nstream\n`, im.bytes, '\nendstream');
+  });
+  const size = 3 + n * 3;
+  const xref = len;
+  push(`xref\n0 ${size}\n0000000000 65535 f \n`);
+  for (let i = 1; i < size; i++) push(`${String(offs[i]).padStart(10, '0')} 00000 n \n`);
+  push(`trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  return new Blob(parts, { type: 'application/pdf' });
+}
+
+async function kobanPdf() {
+  const k = PDF_DPI / 25.4;
+  const L = kobanPages();
+  const images = [];
+  for (let i = 0; i < L.pages.length; i++) {
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(PDF_PAGE.w * k); cv.height = Math.round(PDF_PAGE.h * k);
+    drawKobanPage(cv.getContext('2d'), k, L, L.pages[i], i + 1, L.pages.length);
+    const blob = await new Promise((res) => cv.toBlob(res, 'image/jpeg', 0.92));
+    if (!blob) throw new Error('jpeg');
+    images.push({ bytes: new Uint8Array(await blob.arrayBuffer()), w: cv.width, h: cv.height });
+  }
+  return buildImagePdf(images, 841.89, 595.28);
+}
+
+async function saveKobanPdf() {
+  if (!work || ui.pdfBusy) return;
+  ui.pdfBusy = true;
+  try {
+    let blob;
+    try { blob = await kobanPdf(); } catch (e) { showToast('PDFを作れませんでした'); return; }
+    const filename = exportFileName(`${work.title || '無題'}_香盤表`, new Date()).replace(/\.json$/, '.pdf');
+    if (window.claude && typeof window.claude.use === 'function') {
+      // claude.ai の枠の中：保存を頼む（ファイルを直接落とすことは止められている）
+      if (!cloud.dl || typeof cloud.dl.save !== 'function') { showToast('この画面ではPDFを保存できません'); return; }
+      try {
+        await cloud.dl.save({ filename, data: blob });
+        showToast('PDFを保存しました');
+      } catch (e) {
+        const code = e && e.code;
+        if (code === 'declined') return;
+        showToast(code === 'rate_limited' ? '少し待ってから、もう一度押してください' : 'この画面ではPDFを保存できません');
+      }
+      return;
+    }
+    const file = new File([blob], filename, { type: 'application/pdf' });
+    if (isIOS() && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file] }); } catch (e) { if (!e || e.name !== 'AbortError') downloadFile(file); }
+    } else {
+      downloadFile(file);
+    }
+  } finally {
+    ui.pdfBusy = false;
+  }
 }
 
 function renderPeople() {
@@ -2065,7 +2285,7 @@ function renderPeople() {
   return h('div', { class: 'page people' },
     work.characters.length
       ? [h('div', { class: 'people-tools' },
-           h('button', { type: 'button', class: 'print-btn', onclick: printKoban }, '印刷')),
+           h('button', { type: 'button', class: 'pdf-btn', onclick: saveKobanPdf }, 'PDFを保存')),
          h('div', { class: 'print-title' }, h('b', {}, work.title || '無題'), h('span', {}, '　香盤表')),
          renderPeopleTable(),
          h('div', { class: 'actions people-links' },
@@ -2225,7 +2445,7 @@ function renderGraphChart(chars, cards, nums) {
     }
   });
 
-  // 人物ごとの階段状の線と点
+  // 人物ごとのなめらかな線（点と点のあいだで値をはみ出さない）と点。最後の点から右端までは平らに伸ばす
   const dots = [];
   // 登録順で早い人物ほど上に重ねる（後から描く）
   work.characters.slice().reverse().forEach((p) => {
@@ -2233,10 +2453,7 @@ function renderGraphChart(chars, cards, nums) {
     const pts = [];
     cards.forEach((x, i) => { const v = x.card.states[p.id]; if (v !== undefined) pts.push({ i, v, x }); });
     if (!pts.length) return;
-    let d = `M${xc(pts[0].i)} ${yv(pts[0].v)}`;
-    pts.forEach((pt, k) => {
-      if (k > 0) d += `H${xc(pt.i)}V${yv(pt.v)}`;
-    });
+    let d = monotonePath(pts.map((pt) => [xc(pt.i), yv(pt.v)]));
     d += `H${xc(N - 1)}`;
     svg.append(s('path', { class: 'g-line' + (th && !thChars.has(p.id) ? ' dim' : ''), d, stroke: p.color, 'data-char': p.id }));
     pts.forEach((pt) => dots.push({ p, pt, cx: xc(pt.i), cy: yv(pt.v) }));
