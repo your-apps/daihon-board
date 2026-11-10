@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-11-01f';
+const APP_BUILD = '2026-11-10b';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -79,6 +79,9 @@ const ui = {
   ideaPick: null,    // 発想（スマホ）：選んでいるマンダラートのid
   ideaBlock: null,   // 発想（スマホ）：入っている3×3の番号 0..8
   ideaEdit: null,    // 発想：入力中のマス { m: マンダラートid, i: 添字 }
+  viewSrc: 'stage',  // 人物・グラフで見るもの：'stage'（上演）か 'source'（原作）。作品を開くと 'stage'。データには入れない
+  srcPick: new Set(), // ［原作］で選んでいるイベントのid。データには入れない
+  srcPicking: false, // ［原作］が選ぶ状態か
 };
 
 // ---------- 小道具 ----------
@@ -129,7 +132,16 @@ function newCard() {
     subEvents: '',  // 細かいイベント（1行に1つ）
     intents: {},    // 人物ごとの意図（人物id → 文字）
     beat: null,     // ビート：null＝置き場所に従う（自動）、ビートのid＝手で指定、'none'＝なし
+    src: [],        // 写しの元の原作のイベントのid（原作にないカードは空）
   };
+}
+
+// 原作のイベント：カードと同じ項目（src を除く）＋きっかけのセリフ
+function newEvent() {
+  const e = newCard();
+  delete e.src;
+  e.cue = '';
+  return e;
 }
 
 function newWork(title, type) {
@@ -152,6 +164,8 @@ function newWork(title, type) {
     mandalas: [],    // マンダラート { id, cells: 81個の文字 }
     materials: [],   // 素材 { id, text, src, cards, core }
     memos: [],       // 単語のメモ { id, text }（拾った言葉とは別）
+    sourceOn: false, // 原作あり（［原作］タブを出す）
+    source: { title: '', acts: [] }, // 原作の構成：幕 { id, name, scenes: [{ id, name, place, events }] }
   };
 }
 
@@ -265,6 +279,34 @@ function normalizeWork(w) {
     memoIds.add(id);
     return { id, text: t.text };
   });
+  // 原作の構成：イベントはカードと同じ処理＋きっかけのセリフ。消えた人物・筋への参照は normCard が落とす
+  w.sourceOn = w.sourceOn === true;
+  const sr = w.source && typeof w.source === 'object' ? w.source : {};
+  const gIds = new Set();
+  const gid = (id) => { const v = typeof id === 'string' && id && !gIds.has(id) ? id : uid(); gIds.add(v); return v; };
+  const objs = (a) => (Array.isArray(a) ? a : []).filter((o) => o && typeof o === 'object');
+  const str = (v) => (typeof v === 'string' ? v : '');
+  w.source = {
+    title: str(sr.title),
+    acts: objs(sr.acts).map((a) => ({
+      id: gid(a.id), name: str(a.name),
+      scenes: objs(a.scenes).map((sc) => ({
+        id: gid(sc.id), name: str(sc.name), place: str(sc.place),
+        events: (Array.isArray(sc.events) ? sc.events : []).map((raw) => {
+          const ev = normCard(raw);
+          delete ev.src;
+          ev.cue = str(ev.cue);
+          return ev;
+        }),
+      })),
+    })),
+  };
+  // 上演のカードの src：原作に無いidは落とす
+  const evIds = new Set();
+  w.source.acts.forEach((a) => a.scenes.forEach((sc) => sc.events.forEach((ev) => evIds.add(ev.id))));
+  for (const c of w.blocks.flatMap((b) => b.cards).concat(w.pool)) {
+    c.src = (Array.isArray(c.src) ? c.src : []).filter((id, i, arr) => typeof id === 'string' && evIds.has(id) && arr.indexOf(id) === i);
+  }
   syncIntermission(w);
   return w;
 }
@@ -289,7 +331,7 @@ function addEntity(kind, name) {
 
 function deleteEntity(kind, id) {
   work[kind] = work[kind].filter((e) => e.id !== id);
-  for (const card of allCards().map((x) => x.card).concat(work.pool)) {
+  for (const card of allCards().map((x) => x.card).concat(work.pool, srcEvents().map((e) => e.card))) {
     card[kind] = card[kind].filter((i) => i !== id);
     if (kind === 'characters') { delete card.states[id]; delete card.intents[id]; }
   }
@@ -452,12 +494,60 @@ function findCard(id) {
   const x = allCards().find((y) => y.card.id === id);
   if (x) return x;
   const i = work.pool.findIndex((c) => c.id === id);
-  return i < 0 ? null : { card: work.pool[i], block: poolBlock(), bi: -1, index: i };
+  if (i >= 0) return { card: work.pool[i], block: poolBlock(), bi: -1, index: i };
+  // 原作のイベント（bi は -2。block は場の入れ物）
+  const e = srcEvents().find((y) => y.card.id === id);
+  return e ? { card: e.card, block: { id: 'src:' + e.scene.id, name: sceneName(e.act, e.scene), cards: e.scene.events }, bi: -2, index: e.index, src: e } : null;
+}
+
+// ---------- 原作の構成（データ） ----------
+
+function srcOn() { return !!(work && work.sourceOn === true); }
+// 人物・グラフが原作を見ているか
+function srcView() { return srcOn() && ui.viewSrc === 'source'; }
+function sceneName(act, scene) { return `${act.name || '（幕）'}・${scene.name || '（場）'}`; }
+
+// 原作のイベントを 幕→場→イベント の順に並べる
+function srcEvents() {
+  const out = [];
+  if (!work || !work.source) return out;
+  work.source.acts.forEach((act, ai) => act.scenes.forEach((scene, si) =>
+    scene.events.forEach((ev, index) => out.push({ card: ev, act, ai, scene, si, index, bi: -2 }))));
+  return out;
+}
+
+function srcNumbering() {
+  const map = new Map();
+  srcEvents().forEach((x, n) => map.set(x.card.id, n + 1));
+  return map;
+}
+
+// 人物・グラフが今見ているカード（上演はボードの順、原作はイベントの順）と番号
+function curCards() { return srcView() ? srcEvents() : allCards(); }
+function curNums() { return srcView() ? srcNumbering() : numbering(); }
+// 番号の見せ方。上演のカードは「#3」、原作のイベントは「3」（原作の札に出る上演のカードの番号と見分けるため）
+function numLabel(n) { return srcView() ? String(n) : `#${n}`; }
+
+// 原作のイベント id → それを写した上演のカード [{ card, label }]（描くたびに求める。持たない）
+function srcUsageMap() {
+  const map = new Map();
+  const nums = numbering();
+  const add = (c, label) => (c.src || []).forEach((id) => { if (!map.has(id)) map.set(id, []); map.get(id).push({ card: c, label }); });
+  allCards().forEach((x) => add(x.card, `#${nums.get(x.card.id)}`));
+  work.pool.forEach((c) => add(c, '保留'));
+  return map;
+}
+
+// 消えた原作のイベントを、上演のカードの src から落とす
+function pruneSrc() {
+  const ids = new Set(srcEvents().map((e) => e.card.id));
+  allCards().map((x) => x.card).concat(work.pool).forEach((c) => { c.src = (c.src || []).filter((id) => ids.has(id)); });
+  for (const id of Array.from(ui.srcPick)) if (!ids.has(id)) ui.srcPick.delete(id); // 選び中の印も合わせる
 }
 
 function isBlank(c) {
   return !c.title.trim() && !c.event.trim() && !c.subEvents.trim() && !c.change.trim() && !c.conflict.trim() && !c.place.trim() && !c.big
-    && !c.characters.length && !c.threads.length;
+    && !c.characters.length && !c.threads.length && !(c.cue || '').trim();
 }
 
 // 動かすだけ（保存と描き直しは呼ぶ側）
@@ -484,6 +574,7 @@ function deleteCard(cardId) {
   const x = findCard(cardId);
   if (!x) return;
   x.block.cards.splice(x.index, 1);
+  if (x.bi === -2) pruneSrc(); // 原作のイベントなら、上演のカードの「元」から外す
   if (Array.isArray(work.materials)) work.materials.forEach((t) => { t.cards = t.cards.filter((id) => id !== cardId); }); // 素材の結びから外す
   changed();
 }
@@ -1170,6 +1261,9 @@ function openWork(w) {
   ui.ideaPick = null;
   ui.ideaBlock = null;
   ui.ideaEdit = null;
+  ui.viewSrc = 'stage';
+  ui.srcPick = new Set();
+  ui.srcPicking = false;
   ui.editedSinceSync = false;
   try { localStorage.setItem(LAST_KEY, w.id); } catch (e) { /* 書けなくても無視 */ }
   pushHistory(w, '開いたとき');
@@ -1523,6 +1617,8 @@ function doCloseWork() {
   cloud.pending.clear();
   ui.landed = null;
   ui.focus = null;
+  ui.srcPick = new Set();
+  ui.srcPicking = false;
   closeModal();
   renderMain();
 }
@@ -1790,8 +1886,11 @@ function renderColumns() {
 
 function renderMainTabs() {
   const tab = (key, label) => h('button', { type: 'button', class: 'maintab' + (ui.tab === key ? ' active' : ''),
-    dataset: { tab: key }, onclick: () => { if (ui.tab !== key) { ui.tab = key; renderMain(); window.scrollTo(0, 0); } } }, label);
-  return h('div', { class: 'maintabs' }, tab('board', 'ボード'), tab('people', '人物'), tab('graph', 'グラフ'), tab('core', '芯'), tab('idea', '発想'));
+    dataset: { tab: key }, onclick: () => {
+      if (ui.tab !== key) { ui.tab = key; ui.srcPicking = false; ui.srcPick.clear(); renderMain(); window.scrollTo(0, 0); }
+    } }, label);
+  return h('div', { class: 'maintabs' }, tab('board', 'ボード'), tab('people', '人物'), tab('graph', 'グラフ'),
+    srcOn() && tab('source', '原作'), tab('core', '芯'), tab('idea', '発想'));
 }
 
 // ---------- 次の一手・思いつきを1行で ----------
@@ -1869,8 +1968,11 @@ function renderQuickBar() {
 
 function renderBoard() {
   gpopClose();
+  if (ui.tab === 'source' && !srcOn()) ui.tab = 'board'; // 原作ありを切ったら、［原作］から出る
   let body;
-  if (ui.tab === 'people') {
+  if (ui.tab === 'source') {
+    body = renderSource();
+  } else if (ui.tab === 'people') {
     body = renderPeople();
   } else if (ui.tab === 'core') {
     body = renderCore();
@@ -1881,13 +1983,14 @@ function renderBoard() {
   } else {
     body = h('div', { class: 'page board' }, renderLegend(), renderColumns());
   }
-  const board = ui.tab !== 'people' && ui.tab !== 'core' && ui.tab !== 'graph' && ui.tab !== 'idea';
+  const board = ui.tab === 'board';
   return [
     h('div', { class: 'stickyhead' }, renderTopbar(), renderMainTabs()),
     isUnexported(work) && renderExportBar(),
     !ui.storageOk && h('div', { class: 'banner' }, 'この画面では保存できません。閉じると消えます。'),
     board && renderNextBar(),
     body,
+    ui.tab === 'source' && srcPickBar(),
     board && renderQuickBar(),
   ];
 }
@@ -1903,6 +2006,7 @@ function renderMain() {
   const gwScroll = gw ? gw.scrollLeft : null;
   const ir = document.querySelector('.idea-rail');
   const irScroll = ir ? ir.scrollLeft : null;
+  const srcScroll = Array.from(document.querySelectorAll('.src-scenes')).map((el) => el.scrollLeft);
   app.replaceChildren(...[].concat(work ? renderBoard() : renderWorks()).filter(Boolean));
   if (work) {
     refreshStatus();
@@ -1914,11 +2018,13 @@ function renderMain() {
     if (gw2 && gwScroll != null) gw2.scrollLeft = gwScroll;
     const ir2 = document.querySelector('.idea-rail');
     if (ir2 && irScroll) ir2.scrollLeft = irScroll;
+    document.querySelectorAll('.src-scenes').forEach((el, i) => { if (srcScroll[i]) el.scrollLeft = srcScroll[i]; });
     window.scrollTo(0, scrollY);
     ideaPagerPlace();
   }
   syncIdeaBar();
   document.body.classList.toggle('has-quick', !!work && ui.tab === 'board');
+  document.body.classList.toggle('src-picking', !!work && ui.tab === 'source' && ui.srcPicking);
   syncLift();
   syncLanded();
 }
@@ -2003,6 +2109,7 @@ function entitySection(kind, title, addLabel, promptText) {
 // flat は列の並び（bs＝前の列と別のブロックのカードの始まり。休憩の直後は除く）。
 // segments は見出しの1段目の区切り（ブロックの続き、または休憩の列）。
 function peopleColumns() {
+  if (srcView()) return srcColumns();
   const im = intermissionOf(work);
   const flat = [];
   work.blocks.forEach((b) => {
@@ -2022,36 +2129,55 @@ function peopleColumns() {
     const last = segments[segments.length - 1];
     if (f.col.brk) segments.push({ brk: true, start: i, end: i + 1 });
     else if (last && !last.brk && last.block === f.block) last.end = i + 1;
-    else segments.push({ block: f.block, start: i, end: i + 1 });
+    else segments.push({ block: f.block, label: f.block.name, start: i, end: i + 1 });
+  });
+  return { flat, segments };
+}
+
+// 原作の香盤表の列：幕→場→イベント。休憩は無い。
+// bs＝幕の区切り（前の列と別の幕）、ss＝場の区切り（同じ幕の中で別の場）。見出しの1段目は場ごと
+function srcColumns() {
+  const flat = [], segments = [];
+  work.source.acts.forEach((act, ai) => act.scenes.forEach((scene, si) => {
+    if (!scene.events.length) return;
+    const start = flat.length;
+    scene.events.forEach((ev) => flat.push({ col: { card: ev }, block: act, scene }));
+    segments.push({ block: act, scene, label: `${ai + 1}幕${si + 1}場`, start, end: flat.length });
+  }));
+  flat.forEach((f, i) => {
+    const prev = flat[i - 1];
+    f.bs = !!prev && prev.block !== f.block;
+    f.ss = !!prev && prev.block === f.block && prev.scene !== f.scene;
   });
   return { flat, segments };
 }
 
 function renderPeopleTable() {
-  const nums = numbering();
+  const nums = curNums();
+  const unit = srcView() ? '件' : '枚';
   const { flat, segments } = peopleColumns();
 
   // 休憩の列は見出しの2段と本文をそれぞれ1つのセルにし、同じ帯の色で上から下までつなげる
   const head1 = h('tr', {}, h('th', { class: 'corner', rowspan: 2 }, '人物'),
     segments.map((sg) => sg.brk
       ? h('th', { class: 'brk', rowspan: 2, 'aria-hidden': 'true' })
-      : h('th', { class: 'bh' + (flat[sg.start].bs ? ' bs' : ''), colspan: sg.end - sg.start }, sg.block.name)));
+      : h('th', { class: 'bh' + (flat[sg.start].bs ? ' bs' : '') + (flat[sg.start].ss ? ' ss' : ''), colspan: sg.end - sg.start }, sg.label)));
   const head2 = h('tr', {}, flat.filter((f) => !f.col.brk).map((f) =>
-    h('th', { class: 'ch' + (f.bs ? ' bs' : '') }, `#${nums.get(f.col.card.id)}`)));
+    h('th', { class: 'ch' + (f.bs ? ' bs' : '') + (f.ss ? ' ss' : '') }, numLabel(nums.get(f.col.card.id)))));
 
   // 香盤表：列の並び（休憩で区切る）。続けて出ている間を1本の帯にする
   const colgroup = h('colgroup', {}, h('col', { class: 'c-name' }), flat.map((f) => h('col', { class: f.col.brk ? 'c-brk' : 'c-card' })));
   const nRows = work.characters.length;
   const rows = work.characters.map((p, r) => {
-    const count = allCards().filter((x) => x.card.characters.includes(p.id)).length;
+    const count = curCards().filter((x) => x.card.characters.includes(p.id)).length;
     const onAt = (k) => !!(flat[k] && !flat[k].col.brk && flat[k].col.card.characters.includes(p.id));
     return h('tr', {},
       h('th', { class: 'rname', scope: 'row' },
         personMark(p, 12),
         h('span', { class: 'rn', dataset: { pname: p.id } }, p.name || '（名前なし）'),
-        h('span', { class: 'cnt' }, `${count}枚`)),
+        h('span', { class: 'cnt' }, `${count}${unit}`)),
       flat.map((f, k) => {
-        const bs = f.bs ? ' bs' : '';
+        const bs = (f.bs ? ' bs' : '') + (f.ss ? ' ss' : '');
         if (f.col.brk) return r === 0 ? h('td', { class: 'brk', rowspan: nRows }, h('span', { class: 'brk-label', 'aria-label': '休憩' }, '休', h('br'), '憩')) : null;
         const c = f.col.card;
         const on = onAt(k);
@@ -2096,8 +2222,9 @@ function kobanPages() {
 
 function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   const { flat, segments, rh, top, h1, h2 } = L;
-  const nums = numbering();
-  const INK = '#2d2822', MUTED = '#6e6455', LINE = '#d9d1c1', HEAD = '#f2eee5', SUNK = '#e9e3d6', RULE = '#b7ac97';
+  const nums = curNums();
+  const unit = srcView() ? '件' : '枚';
+  const INK = '#2d2822', MUTED = '#6e6455', LINE = '#d9d1c1', HEAD = '#f2eee5', SUNK = '#e9e3d6', RULE = '#b7ac97', SCENE = '#c9bfad';
   const FONT = '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif';
   const pt = (n) => n * 0.3528 * k; // ポイント → 絵の点
   const X = (mm) => mm * k;
@@ -2119,7 +2246,7 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
   const title = fit(work.title || '無題', X(PDF_PAGE.w - m * 2 - 40));
   ctx.fillText(title, X(m), X(m + 4));
   const tw = ctx.measureText(title).width;
-  font(11, false); ctx.fillText('　香盤表', X(m) + tw, X(m + 4));
+  font(11, false); ctx.fillText(srcView() ? '　香盤表（原作）' : '　香盤表', X(m) + tw, X(m + 4));
 
   // 列の幅
   const NAME = 34, BRK = 7;
@@ -2140,7 +2267,7 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
     if (sg.brk) return;
     const x0 = xs[sg.start], x1 = sg.end === flat.length ? right : xs[sg.end];
     ctx.save(); ctx.beginPath(); ctx.rect(X(x0), X(top), X(x1 - x0), X(h1)); ctx.clip();
-    ctx.fillStyle = INK; font(9, true); ctx.fillText(sg.block.name || '', X(x0 + 1.5), X(top + h1 / 2));
+    ctx.fillStyle = INK; font(9, true); ctx.fillText(sg.label || '', X(x0 + 1.5), X(top + h1 / 2));
     ctx.restore();
   });
   const numSize = Math.min(8, cw / 0.3528 / 2.2);
@@ -2148,7 +2275,7 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
     if (f.col.brk) return;
     const n = nums.get(f.col.card.id);
     font(numSize, false); ctx.fillStyle = MUTED; ctx.textAlign = 'center';
-    ctx.fillText(cw >= 5.5 ? `#${n}` : String(n), X(xs[i] + cw / 2), X(top + h1 + h2 / 2));
+    ctx.fillText(cw >= 5.5 ? numLabel(n) : String(n), X(xs[i] + cw / 2), X(top + h1 + h2 / 2));
   });
 
   // 罫線
@@ -2184,9 +2311,9 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
     if (shapes[p.shape]) ctx.fill(new Path2D(shapes[p.shape]));
     else { ctx.beginPath(); ctx.arc(6, 6, 5, 0, Math.PI * 2); ctx.fill(); }
     ctx.restore();
-    const count = allCards().filter((xx) => xx.card.characters.includes(p.id)).length;
+    const count = curCards().filter((xx) => xx.card.characters.includes(p.id)).length;
     font(7.5, false); ctx.fillStyle = MUTED; ctx.textAlign = 'right';
-    const cnt = `${count}枚`;
+    const cnt = `${count}${unit}`;
     ctx.fillText(cnt, X(m + NAME - 1.5), X(cy));
     const cntW = ctx.measureText(cnt).width;
     font(9, true); ctx.fillStyle = INK; ctx.textAlign = 'left';
@@ -2215,7 +2342,10 @@ function drawKobanPage(ctx, k, L, rowsChars, pageNo, pageCount) {
     });
   });
 
-  // ブロックの区切り：罫線より一段濃いだけの細い線
+  // 場の区切り（原作）：罫線より少し濃い細い線
+  ctx.fillStyle = SCENE;
+  flat.forEach((f, i) => { if (f.ss) ctx.fillRect(X(xs[i] - 0.15), X(top), X(0.3), X(bottom - top)); });
+  // ブロック（原作では幕）の区切り：罫線より一段濃いだけの細い線
   ctx.fillStyle = RULE;
   flat.forEach((f, i) => { if (f.bs) ctx.fillRect(X(xs[i] - 0.25), X(top), X(0.5), X(bottom - top)); });
 
@@ -2272,7 +2402,7 @@ async function saveKobanPdf() {
   try {
     let blob;
     try { blob = await kobanPdf(); } catch (e) { showToast('PDFを作れませんでした'); return; }
-    const filename = exportFileName(`${work.title || '無題'}_香盤表`, new Date()).replace(/\.json$/, '.pdf');
+    const filename = exportFileName(`${work.title || '無題'}_香盤表${srcView() ? '（原作）' : ''}`, new Date()).replace(/\.json$/, '.pdf');
     if (window.claude && typeof window.claude.use === 'function') {
       // claude.ai の枠の中：保存を頼む（ファイルを直接落とすことは止められている）
       if (!cloud.dl || typeof cloud.dl.save !== 'function') { showToast('この画面ではPDFを保存できません'); return; }
@@ -2302,17 +2432,20 @@ function renderPeople() {
     h('summary', {}, '編集'),
     entitySection('characters', '登場人物', '＋人物を足す', '人物の名前'),
     entitySection('threads', '筋', '＋筋を足す', '筋の名前'));
+  const sw = srcSwitch();
+  const noSrc = srcView() && !srcEvents().length;
   return h('div', { class: 'page people' },
     work.characters.length
-      ? [h('div', { class: 'people-tools' },
-           h('button', { type: 'button', class: 'pdf-btn', onclick: saveKobanPdf }, 'PDFを保存')),
-         h('div', { class: 'print-title' }, h('b', {}, work.title || '無題'), h('span', {}, '　香盤表')),
-         renderPeopleTable(),
+      ? [h('div', { class: 'people-tools' }, sw,
+           !noSrc && h('button', { type: 'button', class: 'pdf-btn', onclick: saveKobanPdf }, 'PDFを保存')),
+         h('div', { class: 'print-title' }, h('b', {}, work.title || '無題'), h('span', {}, srcView() ? '　香盤表（原作）' : '　香盤表')),
+         noSrc ? h('p', { class: 'note' }, '原作のイベントがまだありません。') : renderPeopleTable(),
          h('div', { class: 'actions people-links' },
            h('button', { type: 'button', class: 'link to-graph', onclick: () => { ui.tab = 'graph'; renderMain(); window.scrollTo(0, 0); } }, 'グラフで見る'))]
-      : h('div', { class: 'empty-people' },
-          h('p', { class: 'note' }, 'まだ人物がいません。'),
-          h('button', { type: 'button', class: 'primary add-person-direct', onclick: () => promptAddEntity('characters', '人物の名前') }, '＋人物を足す')),
+      : [sw && h('div', { class: 'people-tools' }, sw),
+         h('div', { class: 'empty-people' },
+           h('p', { class: 'note' }, 'まだ人物がいません。'),
+           h('button', { type: 'button', class: 'primary add-person-direct', onclick: () => promptAddEntity('characters', '人物の名前') }, '＋人物を足す'))],
     edit);
 }
 
@@ -2333,7 +2466,7 @@ function s(tag, attrs, ...children) {
 }
 
 function charHasStates(p) {
-  return allCards().some((x) => x.card.states[p.id] !== undefined);
+  return curCards().some((x) => x.card.states[p.id] !== undefined);
 }
 
 function graphVisible(p) {
@@ -2390,6 +2523,7 @@ function monotonePath(pts) {
 
 function renderGraphChart(chars, cards, nums) {
   const N = cards.length;
+  const isSrc = srcView();
   const th = graphThreadSel();
   const inTh = (x) => !!th && x.card.threads.includes(th.id);
   const thChars = new Set();
@@ -2427,17 +2561,29 @@ function renderGraphChart(chars, cards, nums) {
   [[3, '＋3 幸'], [0, '0'], [-3, '−3 不幸']].forEach(([v, t]) =>
     svg.append(s('text', { class: 'g-ylab', x: L - 6, y: yv(v) + 4, 'text-anchor': 'end' }, t)));
 
-  // ブロックの境目と名前、休憩
-  const im = intermissionOf(work);
+  // ブロック（原作では幕）の境目と名前、休憩。原作では場の境目も薄く引く
+  const im = isSrc ? null : intermissionOf(work);
+  const groups = isSrc
+    ? work.source.acts.map((a) => ({ name: a.name, n: a.scenes.reduce((t, sc) => t + sc.events.length, 0), scenes: a.scenes.map((sc) => sc.events.length) }))
+    : work.blocks.map((b) => ({ name: b.name, n: b.cards.length, block: b }));
   let off = 0;
-  work.blocks.forEach((b, bi) => {
-    const n = b.cards.length;
+  groups.forEach((g) => {
+    const n = g.n;
     if (!n) return;
-    if (off > 0) svg.append(s('line', { class: 'g-block', x1: xe(off), x2: xe(off), y1: 6, y2: T + ph }));
+    if (off > 0) svg.append(s('line', { class: 'g-block' + (isSrc ? ' g-act' : ''), x1: xe(off), x2: xe(off), y1: 6, y2: T + ph }));
+    if (g.scenes) {
+      let so = off, first = true;
+      g.scenes.forEach((cnt) => {
+        if (!cnt) return;
+        if (!first) svg.append(s('line', { class: 'g-scene', x1: xe(so), x2: xe(so), y1: T, y2: T + ph }));
+        first = false;
+        so += cnt;
+      });
+    }
     const bx = xe(off) + 4;
     svg.append(s('svg', { x: bx, y: 4, width: Math.max(0, n * cw - 8), height: 18, overflow: 'hidden' },
-      s('text', { class: 'g-blab', x: 0, y: 13 }, b.name)));
-    if (im && im.blockId === b.id) {
+      s('text', { class: 'g-blab', x: 0, y: 13 }, g.name)));
+    if (im && g.block && im.blockId === g.block.id) {
       const xi = xe(off + Math.min(im.index, n));
       svg.append(s('line', { class: 'g-brk', x1: xi, x2: xi, y1: 6, y2: T + ph }),
         s('text', { class: 'g-brklab', x: xi + 3, y: T + ph + 46 }, '休憩'));
@@ -2450,7 +2596,7 @@ function renderGraphChart(chars, cards, nums) {
   cards.forEach((x, i) => {
     const n = i + 1;
     if ((n - 1) % every === 0) {
-      svg.append(s('text', { class: 'g-xlab', x: xc(i), y: T + ph + 14, 'text-anchor': 'middle' }, `#${n}`));
+      svg.append(s('text', { class: 'g-xlab', x: xc(i), y: T + ph + 14, 'text-anchor': 'middle' }, numLabel(n)));
     }
     if (x.card.big) {
       svg.append(s('line', { class: 'g-starline', x1: xc(i), x2: xc(i), y1: T, y2: T + ph }));
@@ -2541,9 +2687,9 @@ function gpopShow(anchor, cardId, pinned) {
   gpopClose();
   const x = findCard(cardId);
   if (!x) return;
-  const nums = numbering();
+  const nums = curNums();
   const el = h('div', { class: 'gpop', role: 'dialog', 'aria-label': 'カードの見出し' },
-    h('div', { class: 'gpop-title' }, `#${nums.get(cardId)} ${cardLabel(x.card)}`),
+    h('div', { class: 'gpop-title' }, `${numLabel(nums.get(cardId))} ${cardLabel(x.card)}`),
     h('button', { type: 'button', class: 'gpop-go primary', onclick: () => { gpopClose(); openCard(cardId); } }, '詳細を見る'));
   document.body.append(el);
   gpop = { el, cardId, anchor, pinned: !!pinned, timer: null };
@@ -2579,19 +2725,24 @@ window.addEventListener('scroll', () => gpopClose(), true);
 window.addEventListener('resize', () => gpopClose());
 
 function renderGraph() {
+  const sw = srcSwitch();
   if (!work.characters.length) {
-    return h('div', { class: 'page graph' },
+    return h('div', { class: 'page graph' }, sw,
       h('div', { class: 'empty-people' },
         h('p', { class: 'note' }, 'まだ人物がいません。'),
         h('button', { type: 'button', class: 'primary add-person-direct', onclick: () => promptAddEntity('characters', '人物の名前') }, '＋人物を足す')));
   }
-  const cards = allCards();
+  const isSrcGraph = srcView();
+  const cards = curCards();
+  if (!cards.length && isSrcGraph) {
+    return h('div', { class: 'page graph' }, sw, h('p', { class: 'note' }, '原作のイベントがまだありません。'));
+  }
   const anyState = work.characters.some(charHasStates);
   if (!anyState) {
-    return h('div', { class: 'page graph' },
+    return h('div', { class: 'page graph' }, sw,
       h('p', { class: 'note' }, 'まだ状態の値がありません。'));
   }
-  const nums = numbering();
+  const nums = curNums();
   const chips = h('div', { class: 'gchips', role: 'group', 'aria-label': '表示する人物' }, work.characters.map((p) => {
     const on = graphVisible(p);
     const has = charHasStates(p);
@@ -2609,10 +2760,332 @@ function renderGraph() {
         onclick: () => { ui.graphThread = t.id; renderMain(); } }, threadMark(t), h('span', {}, t.name || '（名前なし）'));
     }));
   return h('div', { class: 'page graph' },
+    sw,
     threadChips,
     chips,
     h('div', { class: 'gchart-wrap' }, renderGraphChart(work.characters, cards, nums)),
     !th && h('p', { class: 'legend' }, '灰色＝だれの状態も入っていないカード'));
+}
+
+// ---------- 画面：原作（原作の幕・場・イベント） ----------
+// 目的：原作の幕・場ごとのイベントを一望し、上演のボードに写すイベントを選ぶ。
+// 広い画面は幕ごとの横のボード、スマホは縦の目次。データは work.source、選び中の印は ui.srcPick。
+
+// 人物・グラフの［原作｜上演］の切り替え（原作ありのときだけ）
+function srcSwitch() {
+  if (!srcOn()) return null;
+  const b = (key, label) => h('button', { type: 'button', class: 'src-sw' + (ui.viewSrc === key ? ' on' : ''),
+    'aria-pressed': ui.viewSrc === key ? 'true' : 'false', dataset: { view: key },
+    onclick: () => { if (ui.viewSrc !== key) { ui.viewSrc = key; renderMain(); } } }, label);
+  return h('div', { class: 'src-switch', role: 'group', 'aria-label': '原作か上演か' }, b('source', '原作'), b('stage', '上演'));
+}
+
+// 作品の設定の「原作あり」。オンにして幕が無ければ「第1幕・1場」を1つ作る。オフにしてもデータは消さない
+function setSourceOn(on) {
+  work.sourceOn = on;
+  if (on && !work.source.acts.length) addActData();
+  if (!on) {
+    if (ui.tab === 'source') ui.tab = 'board';
+    ui.viewSrc = 'stage';
+    ui.srcPicking = false;
+    ui.srcPick.clear();
+  }
+  changed();
+}
+
+function newScene(n) { return { id: uid(), name: `${n}場`, place: '', events: [] }; }
+
+function addActData() {
+  const acts = work.source.acts;
+  const act = { id: uid(), name: `第${acts.length + 1}幕`, scenes: [newScene(1)] };
+  acts.push(act);
+  return act;
+}
+
+function addAct() { addActData(); changed(); }
+
+// 場を足す（after の次。省けば幕の末尾）
+function addScene(act, after) {
+  const sc = newScene(act.scenes.length + 1);
+  const i = after ? act.scenes.indexOf(after) : -1;
+  act.scenes.splice(i < 0 ? act.scenes.length : i + 1, 0, sc);
+  changed();
+  return sc;
+}
+
+function addEvent(scene) {
+  const ev = newEvent();
+  scene.events.push(ev);
+  ui.newCardId = ev.id;
+  changed();
+  openCard(ev.id);
+}
+
+function swapScene(act, scene, dir) {
+  const i = act.scenes.indexOf(scene), j = i + dir;
+  if (i < 0 || j < 0 || j >= act.scenes.length) return;
+  [act.scenes[i], act.scenes[j]] = [act.scenes[j], act.scenes[i]];
+  changed();
+}
+
+function deleteScene(act, scene) {
+  const n = scene.events.length;
+  if (!confirm(n ? `場「${scene.name || '名前なし'}」と、中のイベント${n}件を削除しますか？元に戻せません。上演のカードは残ります。` : `場「${scene.name || '名前なし'}」を削除しますか？`)) return false;
+  pushHistory(work, '場削除の前');
+  act.scenes.splice(act.scenes.indexOf(scene), 1);
+  pruneSrc();
+  changed();
+  return true;
+}
+
+function deleteAct(act) {
+  const n = act.scenes.reduce((t, sc) => t + sc.events.length, 0);
+  if (!confirm(n ? `幕「${act.name || '名前なし'}」と、中のイベント${n}件を削除しますか？元に戻せません。上演のカードは残ります。` : `幕「${act.name || '名前なし'}」を削除しますか？`)) return false;
+  pushHistory(work, '幕削除の前');
+  work.source.acts.splice(work.source.acts.indexOf(act), 1);
+  pruneSrc();
+  changed();
+  return true;
+}
+
+// イベントを前後へ動かす。同じ場の中で動かし、場の端では隣の場へ移る（幕をまたぐ）
+function moveEventBy(id, dir) {
+  const scenes = work.source.acts.flatMap((a) => a.scenes);
+  const si = scenes.findIndex((sc) => sc.events.some((e) => e.id === id));
+  if (si < 0) return;
+  const evs = scenes[si].events;
+  const i = evs.findIndex((e) => e.id === id), j = i + dir;
+  if (j >= 0 && j < evs.length) {
+    [evs[i], evs[j]] = [evs[j], evs[i]];
+  } else if (dir < 0 && si > 0) {
+    scenes[si - 1].events.push(evs.splice(i, 1)[0]);
+  } else if (dir > 0 && si < scenes.length - 1) {
+    scenes[si + 1].events.unshift(evs.splice(i, 1)[0]);
+  } else return;
+  changed();
+}
+
+// イベントを別の場の末尾へ移す
+function moveEventTo(id, sceneId) {
+  const from = srcEvents().find((e) => e.card.id === id);
+  const to = work.source.acts.flatMap((a) => a.scenes).find((sc) => sc.id === sceneId);
+  if (!from || !to || from.scene === to) return;
+  to.events.push(from.scene.events.splice(from.index, 1)[0]);
+  changed();
+}
+
+// イベントの詳細：置き場所を直す欄（前へ・後へ・移す先の場）
+function eventMoveField(c) {
+  const list = srcEvents();
+  const k = list.findIndex((e) => e.card.id === c.id);
+  if (k < 0) return null;
+  const cur = list[k];
+  const sel = h('select', { 'aria-label': '移す場', class: 'ev-move-select',
+    onchange: (e) => { if (e.target.value) { moveEventTo(c.id, e.target.value); renderCardSheet(); } } },
+    work.source.acts.flatMap((a) => a.scenes.map((sc) => h('option', { value: sc.id, selected: sc === cur.scene }, sceneName(a, sc)))));
+  return h('div', { class: 'field ev-move' },
+    h('span', {}, '置き場所'),
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'ev-prev', disabled: k === 0, onclick: () => { moveEventBy(c.id, -1); renderCardSheet(); } }, '前へ'),
+      h('button', { type: 'button', class: 'ev-next', disabled: k === list.length - 1, onclick: () => { moveEventBy(c.id, 1); renderCardSheet(); } }, '後へ')),
+    h('label', { class: 'field' }, h('span', {}, '別の場へ移す'), sel));
+}
+
+// 上演のカードの詳細：元の原作のイベントの行（押すと［原作］のそのイベントを開く）
+function srcFromRows(c) {
+  if (!srcOn() || !(c.src || []).length) return null;
+  const all = srcEvents();
+  const rows = c.src.map((id) => all.find((e) => e.card.id === id)).filter(Boolean);
+  if (!rows.length) return null;
+  return h('div', { class: 'src-from' }, rows.map((e) => {
+    const cue = (e.card.cue || '').trim();
+    return h('button', { type: 'button', class: 'src-from-btn', dataset: { ev: e.card.id },
+      onclick: () => { closeModal(); ui.tab = 'source'; ui.srcPicking = false; ui.srcPick.clear(); renderMain(); window.scrollTo(0, 0); openCard(e.card.id); } },
+      `元：${sceneName(e.act, e.scene)} ${cardLabel(e.card)}${cue ? `「${cue}」` : ''}`);
+  }));
+}
+
+// 原作のイベントの詳細：上演で使っているカード
+function usedCardsField(c) {
+  const users = srcUsageMap().get(c.id) || [];
+  if (!users.length) return null;
+  return h('div', { class: 'field used-cards' },
+    h('span', {}, '上演で使っているカード'),
+    h('div', { class: 'chips' }, users.map((u) =>
+      h('button', { type: 'button', class: 'chip used-chip', dataset: { card: u.card.id }, onclick: () => openCard(u.card.id) }, u.label))));
+}
+
+// 幕・場を直す小さな画面
+function srcSheet(label, fields, actions) {
+  const sheet = h('div', { class: 'sheet small-sheet src-sheet', role: 'dialog', 'aria-label': label },
+    h('h2', {}, label),
+    fields,
+    h('div', { class: 'actions' }, actions, h('button', { type: 'button', class: 'primary', onclick: closeModal }, '閉じる')));
+  modalRoot.replaceChildren(overlay(sheet, true));
+}
+
+function openActSheet(act) {
+  clearUndo();
+  const nameIn = h('input', { type: 'text', value: act.name, 'aria-label': '幕の名前', oninput: (e) => { act.name = e.target.value; changed(); } });
+  srcSheet('幕を直す',
+    h('label', { class: 'field' }, h('span', {}, '幕の名前'), nameIn),
+    [h('button', { type: 'button', class: 'act-add-scene', onclick: () => { const sc = addScene(act); openSceneSheet(act, sc); } }, '＋場を足す'),
+     h('button', { type: 'button', class: 'act-del danger', onclick: () => { if (deleteAct(act)) closeModal(); } }, 'この幕を消す')]);
+}
+
+function openSceneSheet(act, scene) {
+  clearUndo();
+  const i = act.scenes.indexOf(scene);
+  const nameIn = h('input', { type: 'text', value: scene.name, 'aria-label': '場の名前', oninput: (e) => { scene.name = e.target.value; changed(); } });
+  const placeIn = h('input', { type: 'text', value: scene.place, 'aria-label': '場所', oninput: (e) => { scene.place = e.target.value; changed(); } });
+  srcSheet('場を直す',
+    [h('label', { class: 'field' }, h('span', {}, '場の名前'), nameIn),
+     h('label', { class: 'field' }, h('span', {}, '場所'), placeIn)],
+    [h('button', { type: 'button', class: 'scene-prev', disabled: i <= 0, onclick: () => { swapScene(act, scene, -1); openSceneSheet(act, scene); } }, '前の場と入れ替える'),
+     h('button', { type: 'button', class: 'scene-next', disabled: i >= act.scenes.length - 1, onclick: () => { swapScene(act, scene, 1); openSceneSheet(act, scene); } }, '次の場と入れ替える'),
+     h('button', { type: 'button', class: 'scene-add', onclick: () => { const sc = addScene(act, scene); openSceneSheet(act, sc); } }, '＋場を足す'),
+     h('button', { type: 'button', class: 'scene-del danger', onclick: () => { if (deleteScene(act, scene)) closeModal(); } }, 'この場を消す')]);
+}
+
+// ---- 選んで写す ----
+
+// 選んでいるイベントを原作の順に
+function pickedEvents() {
+  return srcEvents().map((e) => e.card).filter((ev) => ui.srcPick.has(ev.id));
+}
+
+function eventToCard(ev) {
+  const c = newCard();
+  for (const k of ['title', 'place', 'conflict', 'event', 'change', 'subEvents']) c[k] = ev[k];
+  c.big = ev.big;
+  c.characters = ev.characters.slice();
+  c.threads = ev.threads.slice();
+  c.states = Object.assign({}, ev.states);
+  c.intents = Object.assign({}, ev.intents);
+  c.src = [ev.id];
+  return c;
+}
+
+// 1枚にまとめる：文字の欄は空でないものを原作の順に改行でつなぎ、人物・筋は和、状態・意図は後のもので上書き
+function mergeEvents(evs) {
+  const c = newCard();
+  c.title = evs[0].title;
+  c.place = evs[0].place;
+  for (const k of ['event', 'conflict', 'change', 'subEvents']) c[k] = evs.map((e) => e[k]).filter((t) => t.trim()).join('\n');
+  for (const e of evs) {
+    e.characters.forEach((id) => { if (!c.characters.includes(id)) c.characters.push(id); });
+    e.threads.forEach((id) => { if (!c.threads.includes(id)) c.threads.push(id); });
+    Object.assign(c.states, e.states);
+    Object.assign(c.intents, e.intents);
+    if (e.big) c.big = true;
+  }
+  c.src = evs.map((e) => e.id);
+  return c;
+}
+
+function copyPicked(merged) {
+  const evs = pickedEvents();
+  if (!evs.length || (merged && evs.length < 2)) return;
+  const made = merged ? [mergeEvents(evs)] : evs.map(eventToCard);
+  made.forEach((c) => work.pool.push(c));
+  ui.srcPicking = false;
+  ui.srcPick.clear();
+  changed();
+  showToast(`保留に写しました（${made.length}枚）`);
+}
+
+function srcPickBar() {
+  if (!ui.srcPicking) return null;
+  const n = ui.srcPick.size;
+  return h('div', { class: 'src-bar', role: 'group', 'aria-label': '選んだイベントを写す' },
+    h('span', { class: 'src-count' }, `${n}件`),
+    h('button', { type: 'button', class: 'primary src-copy', disabled: n < 1, onclick: () => copyPicked(false) }, 'ボードに写す'),
+    n >= 2 && h('button', { type: 'button', class: 'src-merge', onclick: () => copyPicked(true) }, '1枚にまとめて写す'),
+    h('button', { type: 'button', class: 'src-cancel', onclick: () => { ui.srcPicking = false; ui.srcPick.clear(); renderMain(); } }, 'やめる'));
+}
+
+// ---- 一覧 ----
+
+function evTap(ev) {
+  if (ui.srcPicking) {
+    if (ui.srcPick.has(ev.id)) ui.srcPick.delete(ev.id); else ui.srcPick.add(ev.id);
+    renderMain();
+  } else {
+    openCard(ev.id);
+  }
+}
+
+// 札：使っている上演のカードの番号（保留は「保留」）。使っていなければ「未使用」
+function evBadge(users) {
+  return users && users.length
+    ? h('span', { class: 'sev-badge used' }, users.map((u) => u.label).join(' '))
+    : h('span', { class: 'sev-badge unused' }, '未使用');
+}
+
+function evDots(ev) {
+  const chars = work.characters.filter((p) => ev.characters.includes(p.id));
+  return chars.length > 0 && h('span', { class: 'sev-dots' }, chars.map((p) => personMark(p, 10)));
+}
+
+// 広い画面：ボードのカードと同じ見た目の札
+function eventCardEl(ev, users) {
+  const threads = work.threads.filter((t) => ev.threads.includes(t.id));
+  const picked = ui.srcPick.has(ev.id);
+  return h('button', { type: 'button', class: ['card', 'sev', ev.big && 'big', threads.length && 'has-band', picked && 'picked'].filter(Boolean).join(' '),
+    dataset: { ev: ev.id }, 'aria-pressed': ui.srcPicking ? (picked ? 'true' : 'false') : null, onclick: () => evTap(ev) },
+    threads.length > 0 && h('span', { class: 'bands' }, threads.map((t) => h('span', { class: 'band-seg', style: `background:${t.color}`, title: t.name }))),
+    ev.big && h('span', { class: 'star', title: '大きなイベント' }, '★'),
+    h('span', { class: 'title' + (cardLabel(ev) === '（見出しなし）' ? ' empty' : (ev.title.trim() ? '' : ' fallback')) }, cardLabel(ev)),
+    h('span', { class: 'sev-foot' }, evDots(ev), evBadge(users)));
+}
+
+// スマホ：目次の行
+function eventRowEl(ev, n, users) {
+  const picked = ui.srcPick.has(ev.id);
+  return h('button', { type: 'button', class: 'sev-row' + (ev.big ? ' big' : '') + (picked ? ' picked' : ''),
+    dataset: { ev: ev.id }, 'aria-pressed': ui.srcPicking ? (picked ? 'true' : 'false') : null, onclick: () => evTap(ev) },
+    h('span', { class: 'sev-n' }, String(n)),
+    h('span', { class: 'sev-main' },
+      h('span', { class: 'sev-t' + (cardLabel(ev) === '（見出しなし）' ? ' empty' : '') }, ev.big && '★ ', cardLabel(ev)),
+      evDots(ev)),
+    evBadge(users));
+}
+
+function renderSource() {
+  const src = work.source;
+  const ids = new Set(srcEvents().map((e) => e.card.id));
+  for (const id of Array.from(ui.srcPick)) if (!ids.has(id)) ui.srcPick.delete(id);
+  if (!src.acts.length) {
+    return h('div', { class: 'page source empty-source' },
+      h('button', { type: 'button', class: 'primary src-add-act', onclick: addAct }, '＋幕'));
+  }
+  const nums = srcNumbering();
+  const usage = srcUsageMap();
+  const narrow = narrowMq.matches;
+  const head = h('div', { class: 'src-head' },
+    h('input', { type: 'text', class: 'src-title', value: src.title, placeholder: '原作の名前・版', 'aria-label': '原作の名前・版',
+      oninput: (e) => { src.title = e.target.value; changed(true); } }),
+    !ui.srcPicking && h('button', { type: 'button', class: 'src-pick-btn', disabled: ids.size === 0, onclick: () => { ui.srcPicking = true; renderMain(); } }, '選ぶ'),
+    h('button', { type: 'button', class: 'src-add-act', onclick: addAct }, '＋幕'));
+  const acts = src.acts.map((act) => {
+    const actHead = h('button', { type: 'button', class: 'src-act-head', onclick: () => openActSheet(act) }, act.name || '（名前なし）');
+    const sceneHead = (sc) => h('button', { type: 'button', class: 'src-scene-head', onclick: () => openSceneSheet(act, sc) },
+      h('b', {}, sc.name || '（名前なし）'), sc.place && h('span', { class: 'pl' }, sc.place));
+    if (narrow) {
+      return h('section', { class: 'src-act', dataset: { act: act.id } }, actHead,
+        act.scenes.map((sc) => h('div', { class: 'src-scene', dataset: { scene: sc.id } }, sceneHead(sc),
+          h('div', { class: 'src-list' },
+            sc.events.map((ev) => eventRowEl(ev, nums.get(ev.id), usage.get(ev.id))),
+            h('button', { type: 'button', class: 'src-add-ev', onclick: () => addEvent(sc) }, '＋ イベント')))));
+    }
+    return h('section', { class: 'src-act', dataset: { act: act.id } }, actHead,
+      h('div', { class: 'src-scenes' }, act.scenes.map((sc) =>
+        h('div', { class: 'src-scene', dataset: { scene: sc.id } }, sceneHead(sc),
+          h('div', { class: 'src-events' },
+            sc.events.map((ev) => eventCardEl(ev, usage.get(ev.id))),
+            h('button', { type: 'button', class: 'slot src-add-ev', 'aria-label': 'イベントを足す', onclick: () => addEvent(sc) }, '＋'))))));
+  });
+  return h('div', { class: 'page source' + (ui.srcPicking ? ' picking' : '') + (narrow ? ' narrow' : ' wide') }, head, acts);
 }
 
 // ---------- 画面：芯 ----------
@@ -3592,8 +4065,9 @@ function renderCardSheet() {
   const x = findCard(ui.openCardId);
   if (!x) { closeModal(); return; }
   const c = x.card;
-  // 前・次のカード（ボードはボードの順、保留は保留の中の順）
-  const order = x.bi >= 0 ? allCards().map((y) => y.card.id) : work.pool.map((y) => y.id);
+  const isEv = x.bi === -2; // 原作のイベント
+  // 前・次のカード（ボードはボードの順、保留は保留の中の順、原作はイベントの順）
+  const order = isEv ? srcEvents().map((y) => y.card.id) : x.bi >= 0 ? allCards().map((y) => y.card.id) : work.pool.map((y) => y.id);
   const oi = order.indexOf(c.id);
   const prevId = oi > 0 ? order[oi - 1] : null;
   const nextId = oi >= 0 && oi < order.length - 1 ? order[oi + 1] : null;
@@ -3675,11 +4149,12 @@ function renderCardSheet() {
       '★ 大きなイベント'),
     stateField(c),
     memoField(c),
+    isEv && eventMoveField(c),
     h('div', { class: 'actions' },
       h('span', { class: 'grow' }),
       h('button', { type: 'button', class: 'del-start', onclick: () => {
-        if (!confirm('このカードを削除しますか？元に戻せません。')) return;
-        pushHistory(work, 'カード削除の前');
+        if (!confirm(isEv ? 'このイベントを削除しますか？元に戻せません。上演のカードは残ります。' : 'このカードを削除しますか？元に戻せません。')) return;
+        pushHistory(work, isEv ? 'イベント削除の前' : 'カード削除の前');
         deleteCard(c.id);
         ui.newCardId = null;
         closeModal();
@@ -3689,15 +4164,18 @@ function renderCardSheet() {
     h('div', { class: 'sheet-head' },
       h('button', { type: 'button', class: 'card-prev', 'aria-label': '前のカード', title: '前のカード', disabled: !prevId, onclick: () => goCard(prevId) }, '‹'),
       h('button', { type: 'button', class: 'card-next', 'aria-label': '次のカード', title: '次のカード', disabled: !nextId, onclick: () => goCard(nextId) }, '›'),
-      h('span', { class: 'where' }, x.bi < 0 ? '保留' : `${x.block.name} ${x.index + 1}`),
+      h('span', { class: 'where' }, isEv ? x.block.name : x.bi < 0 ? '保留' : `${x.block.name} ${x.index + 1}`),
       h('button', { type: 'button', class: 'primary', onclick: closeModal }, '閉じる')),
+    !isEv && srcFromRows(c),
     text('title', '見出し', '空なら『何が起きるか』の1行目'),
     chipPicker(c, 'characters', '登場人物', '＋人物を足す', '人物の名前'),
     seedAll,
     text('conflict', '対立', '誰が何を求め、誰が邪魔するか', true),
     text('event', '何が起きるか', 'その瞬間に起きること', true),
+    isEv && text('cue', 'きっかけのセリフ', '短い引用か、行の番号', true),
     text('change', '変化', '全員の欲求がどう変わるか', true),
-    more);
+    more,
+    isEv && usedCardsField(c));
 
   const wasOpen = modalRoot.firstChild;
   const oldSheet = modalRoot.querySelector('.sheet');
@@ -3759,6 +4237,10 @@ function openSettings() {
       h('input', { type: 'checkbox', class: 'show-beats', checked: work.showBeats !== false,
         onchange: (e) => { work.showBeats = e.target.checked; changed(); } }),
       '型の札を表示する'),
+    h('label', { class: 'check' },
+      h('input', { type: 'checkbox', class: 'source-on', checked: work.sourceOn === true,
+        onchange: (e) => setSourceOn(e.target.checked) }),
+      '原作あり（［原作］タブで原作の構成を分析する）'),
     historySection(),
     h('div', { class: 'actions' },
       h('span', { class: 'grow' }),
