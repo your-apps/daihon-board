@@ -783,40 +783,24 @@ button.memo-remove { background: none; border: none; box-shadow: none; padding: 
 .src-pick-btn, .src-head .src-add-act { min-height: 36px; padding: 4px 14px; font-size: 14px; }
 .page.empty-source { display: flex; justify-content: center; padding-top: 48px; }
 .page.empty-source .src-add-act { min-height: 44px; padding: 6px 28px; }
-.src-act { margin-bottom: 14px; min-width: 0; }
-.src-act-head { display: block; width: 100%; min-height: 36px; padding: 6px 2px; text-align: left; font-size: 16px; font-weight: 700; border: 0; border-bottom: 2px solid var(--ink); border-radius: 0; background: transparent; }
-.src-scene-head { display: block; min-height: 28px; padding: 2px 4px; text-align: left; font-size: 14px; border: 0; border-radius: 6px; background: transparent; }
-.src-scene-head b { margin-right: 6px; }
-.src-scene-head .pl { color: var(--muted); font-size: 13px; }
 .sev-badge { flex: 0 0 auto; font-size: 13px; line-height: 1.4; padding: 0 5px; border-radius: 4px; white-space: nowrap; }
 .sev-badge.used { background: var(--ink); color: var(--paper); font-weight: 700; }
-.sev-badge.unused { border: 1px dashed var(--line); color: var(--muted); }
-.sev-dots { display: inline-flex; flex-wrap: wrap; gap: 3px; align-items: center; min-width: 0; }
 
-/* 広い画面：幕ごとの段。場のまとまりを横に並べ、はみ出したら段だけ横に送る */
-.page.source.wide .src-scenes { display: flex; align-items: flex-start; gap: 10px; overflow-x: auto; padding: 8px 0 10px; -webkit-overflow-scrolling: touch; }
-.page.source.wide .src-scene { flex: 0 0 auto; display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: 10px; background: var(--sunk); }
-.src-events { display: flex; align-items: stretch; gap: 6px; }
-.src-events .card.sev { flex: 0 0 150px; width: 150px; min-height: 76px; justify-content: flex-start; gap: 4px; padding-right: 22px; }
 .card.sev .title { display: -webkit-box; }
 .card.sev.big { border: 2px solid var(--ink); }
-.card.sev .sev-foot { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-top: auto; }
-.src-events .slot.src-add-ev { flex: 0 0 40px; width: 40px; min-height: 76px; justify-content: center; }
-.card.sev.picked, .sev-row.picked { box-shadow: 0 0 0 2px var(--ink); }
+.card.sev.picked { box-shadow: 0 0 0 2px var(--ink); }
 .card.sev.picked::before { content: "✓"; position: absolute; top: 2px; right: 6px; font-size: 14px; font-weight: 700; }
-.sev-row.picked::before { content: "✓"; font-weight: 700; flex: 0 0 auto; }
 
-/* スマホ：縦の目次 */
-.page.source.narrow .src-scene { margin-top: 8px; }
-.src-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
-.sev-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 6px 8px; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--paper); }
-.sev-n { flex: 0 0 26px; text-align: right; font-size: 13px; color: var(--muted); }
-/* スマホの目次：見出し（2行まで）の下に人物の印。印が見出しの幅を食わないように */
-.sev-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.sev-t { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.4; }
-.sev-t.empty { color: var(--muted); }
-.sev-row.big .sev-t { font-weight: 700; }
-.page.source.narrow .src-add-ev { width: 100%; min-height: 44px; padding: 6px 8px; text-align: left; border: 0; border-bottom: 1px dashed var(--line); border-radius: 0; background: transparent; color: var(--muted); }
+/* 原作の一覧（ボードと同じ列） */
+.page.source.board-like { padding-left: 0; padding-right: 0; }
+.page.source.board-like .src-pad { padding: 0 16px; }
+.src-act-name { border: 0; background: transparent; padding: 0; text-align: left; min-height: 28px; }
+.src-scene-cap { display: block; width: 100%; min-height: 28px; padding: 6px 2px 0; text-align: left; font-size: 13px; border: 0; border-radius: 0; background: transparent; }
+.src-scene-cap b { margin-right: 6px; }
+.src-scene-cap .pl { color: var(--muted); font-size: 13px; }
+.track .src-scene-cap:not(:first-child) { margin-top: 6px; border-top: 1px solid var(--line); }
+.board-like .card.sev .sev-foot { display: flex; justify-content: flex-end; margin-top: 2px; }
+.board-like .src-add-ev { min-height: 36px; }
 
 /* 選ぶ状態の下の帯 */
 .src-bar { position: sticky; bottom: 0; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
@@ -829,4 +813,3 @@ body.src-picking .toast { bottom: calc(80px + env(safe-area-inset-bottom)); }
 .src-from { display: grid; gap: 4px; }
 .src-from-btn { width: 100%; min-height: 32px; padding: 4px 10px; text-align: left; font-size: 13px; background: var(--sunk); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .used-chip { color: var(--ink); }
-.sev-row .sev-dots { flex-wrap: wrap; }

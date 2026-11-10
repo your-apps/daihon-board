@@ -5,7 +5,7 @@
 // 同じデータを claude.ai のデータベース（claude.use('db')）にも保存する。ほかへは何も送らない。
 
 // 更新のたびに書き換える（本人が、新しい版が届いたかを見分けるため）
-const APP_BUILD = '2026-11-10b';
+const APP_BUILD = '2026-11-10c';
 const FORMAT = 'daihon-board';
 const VERSION = 1;
 const LAST_KEY = 'daihon-board/last'; // 前回開いた作品のid（作品のデータには入れない）
@@ -2006,7 +2006,8 @@ function renderMain() {
   const gwScroll = gw ? gw.scrollLeft : null;
   const ir = document.querySelector('.idea-rail');
   const irScroll = ir ? ir.scrollLeft : null;
-  const srcScroll = Array.from(document.querySelectorAll('.src-scenes')).map((el) => el.scrollLeft);
+  const sc0 = document.getElementById('srccols');
+  const srcScroll = sc0 ? sc0.scrollLeft : null;
   app.replaceChildren(...[].concat(work ? renderBoard() : renderWorks()).filter(Boolean));
   if (work) {
     refreshStatus();
@@ -2018,7 +2019,8 @@ function renderMain() {
     if (gw2 && gwScroll != null) gw2.scrollLeft = gwScroll;
     const ir2 = document.querySelector('.idea-rail');
     if (ir2 && irScroll) ir2.scrollLeft = irScroll;
-    document.querySelectorAll('.src-scenes').forEach((el, i) => { if (srcScroll[i]) el.scrollLeft = srcScroll[i]; });
+    const sc2 = document.getElementById('srccols');
+    if (sc2 && srcScroll) sc2.scrollLeft = srcScroll;
     window.scrollTo(0, scrollY);
     ideaPagerPlace();
   }
@@ -3015,40 +3017,22 @@ function evTap(ev) {
   }
 }
 
-// 札：使っている上演のカードの番号（保留は「保留」）。使っていなければ「未使用」
+// 札：上演で使っているカードの番号（保留は「保留」）。使っていなければ出さない
 function evBadge(users) {
-  return users && users.length
-    ? h('span', { class: 'sev-badge used' }, users.map((u) => u.label).join(' '))
-    : h('span', { class: 'sev-badge unused' }, '未使用');
+  return h('span', { class: 'sev-badge used' }, users.map((u) => u.label).join(' '));
 }
 
-function evDots(ev) {
-  const chars = work.characters.filter((p) => ev.characters.includes(p.id));
-  return chars.length > 0 && h('span', { class: 'sev-dots' }, chars.map((p) => personMark(p, 10)));
-}
-
-// 広い画面：ボードのカードと同じ見た目の札
+// ボードのカードと同じ見た目の札（人物の点は出さない）
 function eventCardEl(ev, users) {
   const threads = work.threads.filter((t) => ev.threads.includes(t.id));
   const picked = ui.srcPick.has(ev.id);
-  return h('button', { type: 'button', class: ['card', 'sev', ev.big && 'big', threads.length && 'has-band', picked && 'picked'].filter(Boolean).join(' '),
+  const used = !!users && users.length > 0;
+  return h('button', { type: 'button', class: ['card', 'sev', ev.big && 'big', !ev.change.trim() && 'nochange', threads.length && 'has-band', picked && 'picked'].filter(Boolean).join(' '),
     dataset: { ev: ev.id }, 'aria-pressed': ui.srcPicking ? (picked ? 'true' : 'false') : null, onclick: () => evTap(ev) },
     threads.length > 0 && h('span', { class: 'bands' }, threads.map((t) => h('span', { class: 'band-seg', style: `background:${t.color}`, title: t.name }))),
     ev.big && h('span', { class: 'star', title: '大きなイベント' }, '★'),
     h('span', { class: 'title' + (cardLabel(ev) === '（見出しなし）' ? ' empty' : (ev.title.trim() ? '' : ' fallback')) }, cardLabel(ev)),
-    h('span', { class: 'sev-foot' }, evDots(ev), evBadge(users)));
-}
-
-// スマホ：目次の行
-function eventRowEl(ev, n, users) {
-  const picked = ui.srcPick.has(ev.id);
-  return h('button', { type: 'button', class: 'sev-row' + (ev.big ? ' big' : '') + (picked ? ' picked' : ''),
-    dataset: { ev: ev.id }, 'aria-pressed': ui.srcPicking ? (picked ? 'true' : 'false') : null, onclick: () => evTap(ev) },
-    h('span', { class: 'sev-n' }, String(n)),
-    h('span', { class: 'sev-main' },
-      h('span', { class: 'sev-t' + (cardLabel(ev) === '（見出しなし）' ? ' empty' : '') }, ev.big && '★ ', cardLabel(ev)),
-      evDots(ev)),
-    evBadge(users));
+    used && h('span', { class: 'sev-foot' }, evBadge(users)));
 }
 
 function renderSource() {
@@ -3059,33 +3043,27 @@ function renderSource() {
     return h('div', { class: 'page source empty-source' },
       h('button', { type: 'button', class: 'primary src-add-act', onclick: addAct }, '＋幕'));
   }
-  const nums = srcNumbering();
   const usage = srcUsageMap();
-  const narrow = narrowMq.matches;
   const head = h('div', { class: 'src-head' },
     h('input', { type: 'text', class: 'src-title', value: src.title, placeholder: '原作の名前・版', 'aria-label': '原作の名前・版',
       oninput: (e) => { src.title = e.target.value; changed(true); } }),
     !ui.srcPicking && h('button', { type: 'button', class: 'src-pick-btn', disabled: ids.size === 0, onclick: () => { ui.srcPicking = true; renderMain(); } }, '選ぶ'),
     h('button', { type: 'button', class: 'src-add-act', onclick: addAct }, '＋幕'));
-  const acts = src.acts.map((act) => {
-    const actHead = h('button', { type: 'button', class: 'src-act-head', onclick: () => openActSheet(act) }, act.name || '（名前なし）');
-    const sceneHead = (sc) => h('button', { type: 'button', class: 'src-scene-head', onclick: () => openSceneSheet(act, sc) },
-      h('b', {}, sc.name || '（名前なし）'), sc.place && h('span', { class: 'pl' }, sc.place));
-    if (narrow) {
-      return h('section', { class: 'src-act', dataset: { act: act.id } }, actHead,
-        act.scenes.map((sc) => h('div', { class: 'src-scene', dataset: { scene: sc.id } }, sceneHead(sc),
-          h('div', { class: 'src-list' },
-            sc.events.map((ev) => eventRowEl(ev, nums.get(ev.id), usage.get(ev.id))),
-            h('button', { type: 'button', class: 'src-add-ev', onclick: () => addEvent(sc) }, '＋ イベント')))));
-    }
-    return h('section', { class: 'src-act', dataset: { act: act.id } }, actHead,
-      h('div', { class: 'src-scenes' }, act.scenes.map((sc) =>
-        h('div', { class: 'src-scene', dataset: { scene: sc.id } }, sceneHead(sc),
-          h('div', { class: 'src-events' },
-            sc.events.map((ev) => eventCardEl(ev, usage.get(ev.id))),
-            h('button', { type: 'button', class: 'slot src-add-ev', 'aria-label': 'イベントを足す', onclick: () => addEvent(sc) }, '＋'))))));
-  });
-  return h('div', { class: 'page source' + (ui.srcPicking ? ' picking' : '') + (narrow ? ' narrow' : ' wide') }, head, acts);
+  const cols = h('div', { class: 'cols src-cols', id: 'srccols' },
+    src.acts.map((act) => {
+      const n = act.scenes.reduce((k, sc) => k + sc.events.length, 0);
+      return h('section', { class: 'row', dataset: { act: act.id } },
+        h('div', { class: 'row-head' },
+          h('button', { type: 'button', class: 'row-name src-act-name', onclick: () => openActSheet(act) }, act.name || '（名前なし）'),
+          h('span', { class: 'row-count' }, `${n}件`)),
+        h('div', { class: 'track' }, act.scenes.map((sc) => [
+          h('button', { type: 'button', class: 'src-scene-cap', dataset: { scene: sc.id }, onclick: () => openSceneSheet(act, sc) },
+            h('b', {}, sc.name || '（名前なし）'), sc.place && h('span', { class: 'pl' }, sc.place)),
+          sc.events.map((ev) => eventCardEl(ev, usage.get(ev.id))),
+          h('button', { type: 'button', class: 'slot src-add-ev', 'aria-label': 'イベントを足す', onclick: () => addEvent(sc) }, '＋'),
+        ])));
+    }));
+  return h('div', { class: 'page source board-like' + (ui.srcPicking ? ' picking' : '') }, h('div', { class: 'src-pad' }, head), cols);
 }
 
 // ---------- 画面：芯 ----------
